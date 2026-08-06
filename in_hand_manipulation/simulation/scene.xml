@@ -1,0 +1,25 @@
+<mujoco model="tesollo_in_hand_scene">
+  <include file="gripper_only.xml"/>
+
+  <statistic center="0 0 0.2" extent="0.6"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81"/>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.3 0.5 0.7" rgb2="0 0 0" width="512" height="512"/>
+    <texture name="grid" type="2d" builtin="checker" width="512" height="512" rgb1=".1 .2 .3" rgb2=".2 .3 .4"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true" reflectance=".2"/>
+    <material name="object_mat" rgba="0.8 0.2 0.2 1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="grid"/>
+
+    <!-- Target Cylinder Object placed near the palm -->
+    <body name="target_object" pos="0.0 0.0 0.15">
+      <freejoint name="object_joint"/>
+      <geom name="object_geom" type="cylinder" size="0.025 0.04" mass="0.1" material="object_mat" friction="1 0.005 0.0001"/>
+    </body>
+  </worldbody>
+</mujoco>

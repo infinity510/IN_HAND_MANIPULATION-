@@ -107,6 +107,9 @@ class TesolloInHandEnv(gym.Env):
         return reward, terminated
 
     def render(self):
+        if self.render_mode != "human":
+            return
+
         if self.viewer is None:
             try:
                 self.viewer = mujoco.viewer.launch_passive(self.model, self.data)

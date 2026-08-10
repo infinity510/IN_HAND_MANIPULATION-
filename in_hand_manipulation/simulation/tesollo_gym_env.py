@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("MUJOCO_GL", "egl")
+
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -103,20 +106,45 @@ class TesolloInHandEnv(gym.Env):
 
         return reward, terminated
 
+    def render(self):
+        if self.viewer is None:
+            try:
+                self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            except Exception as e:
+                print("Failed to launch MuJoCo viewer:", e)
+                self.viewer = None
+                return
+
+        try:
+            self.viewer.sync()
+        except Exception as e:
+            print("Viewer sync failed:", e)
+            self.viewer = None
+
+    def close(self):
+        if self.viewer is not None:
+            try:
+                self.viewer.close()
+            except Exception:
+                pass
+            self.viewer = None
+
 
 if __name__ == "__main__":
     env = TesolloInHandEnv(model_path="/mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/in_hand_manipulation/simulation/scene.xml")
     obs, info = env.reset()
-    
+
     print("Launching viewer to watch random actions...")
-    with mujoco.viewer.launch_passive(env.model, env.data) as viewer:
+    try:
         for _ in range(500):  # Run for 500 steps
             random_action = env.action_space.sample()  # Brainless random twitching
             obs, reward, terminated, truncated, info = env.step(random_action)
-            
-            viewer.sync()
+
+            env.render()
             time.sleep(0.02)
-            
+
             if terminated:
                 print("Object dropped! Resetting...")
                 env.reset()
+    finally:
+        env.close()

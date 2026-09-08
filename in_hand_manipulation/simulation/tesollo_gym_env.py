@@ -128,26 +128,86 @@ class TesolloInHandEnv(gym.Env):
         if self.viewer is not None:
             try:
                 self.viewer.close()
+                time.sleep(0.1)  # Allow background viewer thread to finish tearing down
             except Exception:
                 pass
             self.viewer = None
 
 
 if __name__ == "__main__":
-    env = TesolloInHandEnv(model_path="/mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/in_hand_manipulation/simulation/scene.xml", render_mode="human")
-    obs, info = env.reset()
+    import argparse
+    import glfw
 
-    print("Launching viewer to watch random actions...")
-    try:
-        for _ in range(500):  # Run for 500 steps
-            random_action = env.action_space.sample()  # Brainless random twitching
-            obs, reward, terminated, truncated, info = env.step(random_action)
+    parser = argparse.ArgumentParser(description="Test the Tesollo In-Hand Manipulation Environment")
+    parser.add_argument("--random", action="store_true", help="Run with random actions instead of interactive mode")
+    args = parser.parse_args()
 
-            env.render()
-            time.sleep(0.02)
+    model_path = "/mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/in_hand_manipulation/simulation/scene.xml"
 
-            if terminated:
-                print("Object dropped! Resetting...")
-                env.reset()
-    finally:
-        env.close()
+    if not args.random:
+        print("Launching Keyboard Control Mode...")
+        print("Select actuator using keys:")
+        print("  Finger 1: Q, W, E, R")
+        print("  Finger 2: A, S, D, F")
+        print("  Finger 3: Z, X, C, V")
+        print("Move selected actuator: Left/Right Arrow Keys")
+        print("Press Spacebar to pause/unpause physics if it is stopped.")
+
+        model = mujoco.MjModel.from_xml_path(model_path)
+        data = mujoco.MjData(model)
+
+        selected_actuator = 0
+
+        def key_callback(keycode):
+            global selected_actuator
+            
+            key_map = {
+                glfw.KEY_Q: 0, glfw.KEY_W: 1, glfw.KEY_E: 2, glfw.KEY_R: 3,
+                glfw.KEY_A: 4, glfw.KEY_S: 5, glfw.KEY_D: 6, glfw.KEY_F: 7,
+                glfw.KEY_Z: 8, glfw.KEY_X: 9, glfw.KEY_C: 10, glfw.KEY_V: 11,
+            }
+            
+            if keycode in key_map:
+                selected_actuator = key_map[keycode]
+                # Fallback to string index if actuator name is not available
+                name = model.actuator(selected_actuator).name
+                print(f"Selected Actuator: {selected_actuator} ({name})")
+            
+            step_size = 0.05
+            if keycode == glfw.KEY_LEFT:
+                target = data.ctrl[selected_actuator] - step_size
+                ctrl_min = model.actuator_ctrlrange[selected_actuator][0]
+                data.ctrl[selected_actuator] = max(ctrl_min, target)
+                print(f"Actuator {selected_actuator} target: {data.ctrl[selected_actuator]:.2f}")
+            elif keycode == glfw.KEY_RIGHT:
+                target = data.ctrl[selected_actuator] + step_size
+                ctrl_max = model.actuator_ctrlrange[selected_actuator][1]
+                data.ctrl[selected_actuator] = min(ctrl_max, target)
+                print(f"Actuator {selected_actuator} target: {data.ctrl[selected_actuator]:.2f}")
+
+        viewer = mujoco.viewer.launch_passive(model, data, key_callback=key_callback)
+        
+        while viewer.is_running():
+            mujoco.mj_step(model, data)
+            viewer.sync()
+            time.sleep(model.opt.timestep)
+            
+        viewer.close()
+    else:
+        env = TesolloInHandEnv(model_path=model_path, render_mode="human")
+        obs, info = env.reset()
+
+        print("Launching viewer to watch random actions...")
+        try:
+            for _ in range(500):  # Run for 500 steps
+                random_action = env.action_space.sample()  # Brainless random twitching
+                obs, reward, terminated, truncated, info = env.step(random_action)
+
+                env.render()
+                time.sleep(0.02)
+
+                if terminated:
+                    print("Object dropped! Resetting...")
+                    env.reset()
+        finally:
+            env.close()

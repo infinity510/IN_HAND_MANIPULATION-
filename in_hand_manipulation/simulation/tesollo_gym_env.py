@@ -134,7 +134,7 @@ class TesolloInHandEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = TesolloInHandEnv(model_path="/mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/in_hand_manipulation/simulation/scene.xml")
+    env = TesolloInHandEnv(model_path="/mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/in_hand_manipulation/simulation/scene.xml", render_mode="human")
     obs, info = env.reset()
 
     print("Launching viewer to watch random actions...")

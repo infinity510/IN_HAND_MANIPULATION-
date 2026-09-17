@@ -1,0 +1,43 @@
+# Dex-Retargeting configuration for the TESOLLO Delto Gripper 3-Finger (DG-3F-B)
+# Used for point-to-point Cartesian retargeting of 3 ArUco marker positions to robot fingertips.
+
+urdf_path: "../simulation/gripper_only.urdf"
+
+# Base frame of the gripper (acts as the root for kinematics)
+# The URDF root link is `gripper_base_link`
+base_link: "gripper_base_link"
+
+# Target joints to be optimized by Inverse Kinematics (12 DoF total)
+target_joint_names:
+  - gripper_f1m1_joint
+  - gripper_f1m2_joint
+  - gripper_f1m3_joint
+  - gripper_f1m4_joint
+  - gripper_f2m1_joint
+  - gripper_f2m2_joint
+  - gripper_f2m3_joint
+  - gripper_f2m4_joint
+  - gripper_f3m1_joint
+  - gripper_f3m2_joint
+  - gripper_f3m3_joint
+  - gripper_f3m4_joint
+
+# Target link names corresponding to the 3 fingertip positions
+# Mapped to ArUco marker coordinates: Thumb (0), Index (1), Middle (2)
+target_link_names:
+  - gripper_f1_04_link  # Thumb
+  - gripper_f2_04_link  # Index
+  - gripper_f3_04_link  # Middle
+
+retargeting:
+  # Position retargeting maps absolute Cartesian positions to the target links.
+  # The optimizer minimizes the L2 distance between commanded 3D points and link 3D points.
+  type: position
+  
+  # Optimizer settings
+  optimizer:
+    # Use Non-Linear Optimization (nlopt is standard in dex-retargeting)
+    type: nlopt
+    
+    # Optional regularizations to keep joints near a rest pose or minimize sudden movements
+    # regularization_weight: 0.05

@@ -11,144 +11,156 @@ import os
 
 logging.basicConfig(level=logging.INFO)
 
-# --- Configuration ---
 SCENE_XML = os.path.join(os.path.dirname(__file__), "../simulation/scene.xml")
 RETARGET_YML = os.path.join(os.path.dirname(__file__), "delto_3f_retarget.yml")
 
 CONTROL_HZ = 20
 SIM_HZ = 500
 SUBSTEPS = SIM_HZ // CONTROL_HZ
-MAX_JOINT_VEL = 0.5  # rad per control step
+MAX_JOINT_VEL = 0.5 
 
-# Map Camera coordinates to Robot coordinates
-# Assumes overhead camera looking down at desk
 R_CAM2ROB = np.array([
-    [ 0, -1,  0],  # Cam Y (vertical) -> Robot -X (backward)
-    [-1,  0,  0],  # Cam X (horizontal) -> Robot -Y (right)
-    [ 0,  0, -1]   # Cam Z (depth) -> Robot -Z (down)
+    [ 0, -1,  0],  
+    [-1,  0,  0],  
+    [ 0,  0, -1]   
 ])
-POSITION_SCALING = 2.5  # Amplified scaling so human pinches fully close the gripper
-
+POSITION_SCALING = 1.5  
 
 class TeleopSystem:
-    """
-    Teleoperation pipeline using Intel RealSense (ArUco markers) and dex-retargeting.
-    Implements a clutch mechanism via the SPACEBAR.
-    """
     def __init__(self):
-        # 1. Load MuJoCo Model
-        logging.info(f"Loading MuJoCo scene: {SCENE_XML}")
+        self.tracker = ArucoTracker(marker_length=0.015)
+        self.tracker.start()
+        
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
         self.data = mujoco.MjData(self.model)
         
-        # 2. Setup Dex-Retargeting
-        logging.info(f"Loading retargeting config: {RETARGET_YML}")
-        self.retarget_config = RetargetingConfig.load_from_file(RETARGET_YML)
-        self.retargeter = self.retarget_config.build()
+        config = RetargetingConfig.load_from_file(RETARGET_YML)
+        self.retargeter = config.build()
         
-        # 3. Identify link names and IDs for the 3 fingertips
-        self.link_names = self.retarget_config.target_link_names
-        self.link_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) for name in self.link_names]
-        
-        # 4. Map target joints to position actuators
-        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name) 
-                          for name in self.retarget_config.target_joint_names]
-        self.actuator_ids = []
-        for jid in self.joint_ids:
-            found = False
-            for i in range(self.model.nu):
-                # If actuator drives a joint and the joint ID matches our target
-                if self.model.actuator_trntype[i] == mujoco.mjtTrn.mjTRN_JOINT and self.model.actuator_trnid[i, 0] == jid:
-                    self.actuator_ids.append(i)
-                    found = True
-                    break
-            if not found:
-                logging.warning(f"No position actuator found for joint ID {jid}")
-                self.actuator_ids.append(-1)
-                
-        # 5. Initialize Tracker
-        self.tracker = ArucoTracker(marker_length=0.015)
-        
-        # 6. Clutch State Variables
         self.clutch_active = False
-        self.human_anchor = None  # Shape (3, 3)
-        self.robot_anchor = None  # Shape (3, 3)
-        self.last_qpos = None
+        self.absolute_mode = False
+        self.trigger_reset = False
+        self.human_anchor = None
+        self.robot_anchor = None
+        
+        self.joint_names = self.retargeter.optimizer.robot.dof_joint_names
+        self.joint_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name) for name in self.joint_names]
+        
+        self.actuator_ids = []
+        for name in self.joint_names:
+            act_name = name.replace("gripper_", "act_").replace("_joint", "")
+            act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
+            self.actuator_ids.append(act_id)
+
+    def get_robot_tip_positions(self):
+        # Use Dex-Retargeting's internal FK to prevent any anchor mismatch jumps!
+        robot = self.retargeter.optimizer.robot
+        robot.compute_forward_kinematics(self.last_qpos)
+        positions = []
+        for idx in self.retargeter.optimizer.target_link_indices:
+            positions.append(robot.get_link_pose(idx)[:3, 3].copy())
+        return np.array(positions)
 
     def on_press(self, key):
-        if key == keyboard.Key.space and not self.clutch_active:
+        if key == keyboard.Key.space:
             self.clutch_active = True
+        try:
+            if key.char == 'o':
+                self.absolute_mode = not getattr(self, 'absolute_mode', False)
+                logging.info(f"Absolute Mode (O-key): {self.absolute_mode}")
+            elif key.char == 'r':
+                self.trigger_reset = True
+        except: pass
 
     def on_release(self, key):
         if key == keyboard.Key.space:
             self.clutch_active = False
-
-    def get_robot_tip_positions(self):
-        """Returns shape (3, 3) array of current robot fingertip positions."""
-        positions = []
-        for body_id in self.link_ids:
-            positions.append(self.data.xpos[body_id].copy())
-        return np.array(positions)
+            self.human_anchor = None
+            self.robot_anchor = None
 
     def run(self):
-        self.tracker.start()
-        
-        # Start Keyboard Listener
         listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
         listener.start()
         
-        # Reset and step simulation to initialize all kinematics
         mujoco.mj_resetData(self.model, self.data)
         
-        # --- INITIALIZE TO 120 DEGREE TRIPOD GRASP ---
-        # f1 is thumb (0 deg), f2 is index (-60 deg), f3 is middle (+60 deg)
-        # This gives a symmetric starting pose so the IK solver can easily twist and sway!
-        for name, val in [("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
+        # INITIALIZE TO A PINCHED 120-DEGREE TRIPOD GRASP
+        initial_pose = [
+            ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
+            ("gripper_f1m3_joint", 1.0), ("gripper_f1m4_joint", 1.0),
+            ("gripper_f2m3_joint", 1.0), ("gripper_f2m4_joint", 1.0),
+            ("gripper_f3m3_joint", 1.0), ("gripper_f3m4_joint", 1.0),
+        ]
+        for name, val in initial_pose:
             try:
                 jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
-                if jid != -1:
-                    self.data.qpos[self.model.jnt_qposadr[jid]] = val
+                if jid != -1: self.data.qpos[self.model.jnt_qposadr[jid]] = val
             except: pass
             
         mujoco.mj_forward(self.model, self.data)
-        
-        # Initialize target joint positions
         qpos_indices = [self.model.jnt_qposadr[jid] for jid in self.joint_ids]
         self.last_qpos = np.array([self.data.qpos[idx] for idx in qpos_indices])
         
-        # VERY IMPORTANT: Tell dex-retargeting to start its optimizer from this tripod pose!
-        if hasattr(self.retargeter, 'set_qpos'):
-            self.retargeter.set_qpos(self.last_qpos)
-            
-        # Sync control array with initial positions to hold the gripper steady
         for i, aid in enumerate(self.actuator_ids):
-            if aid != -1:
-                self.data.ctrl[aid] = self.last_qpos[i]
+            if aid != -1: self.data.ctrl[aid] = self.last_qpos[i]
 
         try:
             with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
                 logging.info("=======================================")
-                logging.info(" Teleoperation Sim Running! (20 Hz)    ")
-                logging.info(" Hold SPACEBAR to clutch in and move.  ")
-                logging.info(" Release SPACEBAR to pause teleop.     ")
+                logging.info(" Teleop Running! (20 Hz)               ")
+                logging.info(" Press 'o' to toggle ABSOLUTE MODE.    ")
+                logging.info(" Hold SPACEBAR for relative mode.      ")
                 logging.info("=======================================")
                 
                 while viewer.is_running():
                     step_start = time.time()
                     
-                    # 1. Fetch Tracking Data
+                    if getattr(self, 'trigger_reset', False):
+                        self.trigger_reset = False
+                        
+                        self.last_qpos = np.zeros_like(self.last_qpos)
+                        reset_pose = [
+                            ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
+                            ("gripper_f1m3_joint", 1.0), ("gripper_f1m4_joint", 1.0),
+                            ("gripper_f2m3_joint", 1.0), ("gripper_f2m4_joint", 1.0),
+                            ("gripper_f3m3_joint", 1.0), ("gripper_f3m4_joint", 1.0),
+                        ]
+                        for name, val in reset_pose:
+                            try:
+                                idx = self.joint_names.index(name)
+                                self.last_qpos[idx] = val
+                            except: pass
+                            
+                        for i, aid in enumerate(self.actuator_ids):
+                            if aid != -1: self.data.ctrl[aid] = self.last_qpos[i]
+                            
+                        for i, name in enumerate(self.joint_names):
+                            try:
+                                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, name)
+                                if jid != -1:
+                                    self.data.qpos[self.model.jnt_qposadr[jid]] = self.last_qpos[i]
+                                    self.data.qvel[self.model.jnt_dofadr[jid]] = 0.0
+                            except: pass
+                            
+                        mujoco.mj_forward(self.model, self.data)
+                        if hasattr(self.retargeter, 'set_qpos'):
+                            self.retargeter.set_qpos(self.last_qpos)
+                            
+                        self.clutch_active = False
+                        self.human_anchor = None
+                        self.robot_anchor = None
+                        logging.info("Reset to initial starting pose.")
+                        
                     tracking_out, frame = self.tracker.step()
                     
                     if frame is not None:
-                        # Display clutch status on the camera feed
-                        status_text = "CLUTCH: ACTIVE" if self.clutch_active else "CLUTCH: RELEASED"
-                        color = (0, 255, 0) if self.clutch_active else (0, 0, 255)
-                        cv2.putText(frame, status_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+                        mode_text = "MODE: ABSOLUTE (O)" if self.absolute_mode else ("MODE: RELATIVE (SPACE)" if self.clutch_active else "MODE: PAUSED")
+                        color = (0, 255, 255) if self.absolute_mode else ((0, 255, 0) if self.clutch_active else (0, 0, 255))
+                        cv2.putText(frame, mode_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
                         cv2.imshow("ArUco Teleop Feed", frame)
                         cv2.waitKey(1)
                     
                     if tracking_out is not None:
-                        # Extract 3D points for Thumb (0), Index (1), Middle (2)
                         valid_tracking = True
                         human_pos = []
                         for m_id in [0, 1, 2]:
@@ -158,67 +170,168 @@ class TeleopSystem:
                                 break
                             human_pos.append(pos)
                         
-                        # 2. Process Teleoperation if Clutched In
-                        if self.clutch_active and valid_tracking:
+                        target_robot_pos = None
+                        direct_qpos = None
+                        target_qpos = None
+                        
+                        # ==========================================
+                        # ABSOLUTE MAPPING (Triggered by 'o')
+                        # ==========================================
+                        if self.absolute_mode and valid_tracking:
                             human_pos = np.array(human_pos)
+                            centroid = np.mean(human_pos, axis=0)
+                            centered = human_pos - centroid
                             
-                            # Clutch Just Engaged: set anchor frames
+                            # 1. Find overall hand rotation (align Thumb to +X)
+                            p0 = centered[0, :2]
+                            p1 = centered[1, :2]
+                            p2 = centered[2, :2]
+                            v_human = p0 - (p1 + p2) / 2.0
+                            v_len = np.linalg.norm(v_human) + 1e-6
+                            v_human /= v_len
+                            theta_hand = np.arctan2(v_human[1], v_human[0])
+                            
+                            # 2. Rotate all points into the canonical hand frame
+                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
+                            R_2d = np.array([[c, -s], [s, c]])
+                            
+                            aligned = np.zeros_like(centered)
+                            for i in range(3):
+                                aligned[i, :2] = R_2d @ centered[i, :2]
+                                
+                            # 3. Independent Finger Mapping (Curl Only)
+                            # We lock the tripod (m1) and sway (m2) to guarantee the fingers NEVER cross or tangle!
+                            curls = []
+                            for i in range(3):
+                                pt = aligned[i, :2]
+                                r = np.linalg.norm(pt)
+                                
+                                # Distance from center -> Curl (m3, m4)
+                                # r ranges from ~0.02 (pinched) to ~0.07 (open)
+                                curl_i = 1.0 - (r - 0.02) * 20.0
+                                curl_i = np.clip(curl_i, -0.2, 1.2)
+                                curls.append(curl_i)
+                                
+                            # 4. Apply to joints
+                            direct_qpos = self.last_qpos.copy()
+                            
+                            # Lock m1 to perfect 120-degree tripod
+                            for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
+                                try:
+                                    idx = self.joint_names.index(j_name)
+                                    direct_qpos[idx] = base_val
+                                except: pass
+                                
+                            # Apply independent curl (m3, m4) and lock sway (m2)
+                            for i, f_idx in enumerate([1, 2, 3]):
+                                # Lock Sway (m2) to 0
+                                try:
+                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                    direct_qpos[idx] = 0.0
+                                except: pass
+                                
+                                # Apply Curl (m3, m4)
+                                for m_idx in [3, 4]:
+                                    try:
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                        direct_qpos[idx] = curls[i]
+                                    except: pass
+
+                        # ==========================================
+                        # ULTIMATE HYBRID MAPPING (Triggered by SPACEBAR)
+                        # ==========================================
+                        elif self.clutch_active and valid_tracking and not self.absolute_mode:
+                            human_pos = np.array(human_pos)
+                            centroid = np.mean(human_pos, axis=0)
+                            centered = human_pos - centroid
+                            
+                            # 1. Overall Hand Twist (Theta)
+                            p0, p1, p2 = centered[0, :2], centered[1, :2], centered[2, :2]
+                            v_human = p0 - (p1 + p2) / 2.0
+                            theta_hand = np.arctan2(v_human[1], v_human[0])
+                            
+                            # 2. Independent Finger Angles
+                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
+                            R_2d = np.array([[c, -s], [s, c]])
+                            aligned = np.zeros_like(centered)
+                            for i in range(3):
+                                aligned[i, :2] = R_2d @ centered[i, :2]
+                                
+                            finger_angles = []
+                            finger_spreads = []
+                            for i in range(3):
+                                pt = aligned[i, :2]
+                                finger_spreads.append(np.linalg.norm(pt))
+                                finger_angles.append(np.arctan2(pt[1], pt[0]))
+                            
+                            # Initialization at Clutch-In
                             if self.human_anchor is None:
-                                self.human_anchor = human_pos.copy()
-                                self.robot_anchor = self.get_robot_tip_positions()
+                                self.human_anchor = human_pos.copy() # Just as a flag
+                                self.init_theta = theta_hand
+                                self.init_finger_angles = finger_angles
+                                # Record the robot's physical state at clutch-in to apply deltas to!
+                                self.init_robot_qpos = self.last_qpos.copy()
                                 
-                                # Tell Dex-Retargeting optimizer to start from the current robot pose!
-                                if hasattr(self.retargeter, 'set_qpos'):
-                                    self.retargeter.set_qpos(self.last_qpos)
-                                    
-                                logging.info("Clutched IN.")
+                            # 3. Compute Joint Commands
+                            target_qpos = self.init_robot_qpos.copy()
+                            
+                            # Tripod Twist (m1): Delta from initial twist
+                            twist_delta = theta_hand - self.init_theta
+                            twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
+                            twist_delta *= 1.2 # Sensitivity
+                            
+                            for j_name in ["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]:
+                                try:
+                                    idx = self.joint_names.index(j_name)
+                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + twist_delta, -1.0, 1.0)
+                                except: pass
                                 
-                            # Calculate Cartesian delta in camera frame
-                            delta_human = human_pos - self.human_anchor
+                            # Sway (m2): Delta from initial finger angles
+                            for i, f_idx in enumerate([1, 2, 3]):
+                                angle_delta = finger_angles[i] - self.init_finger_angles[i]
+                                angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
+                                
+                                try:
+                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
+                                except: pass
+                                
+                                # Curl (m3, m4): Absolute spread mapping (Flawless Pinch)
+                                r = finger_spreads[i]
+                                curl_i = 1.0 - (r - 0.02) * 20.0
+                                curl_i = np.clip(curl_i, -0.2, 1.2)
+                                
+                                for m_idx in [3, 4]:
+                                    try:
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                        target_qpos[idx] = curl_i
+                                    except: pass
+                                
+                        elif not self.clutch_active:
+                            self.human_anchor = None
                             
-                            # Transform to robot coordinate frame and scale
-                            delta_robot = (delta_human @ R_CAM2ROB.T) * POSITION_SCALING
+                        # ==========================================
+                        # APPLY JOINTS (Bypassing IK Solver!)
+                        # ==========================================
+                        if direct_qpos is not None:
+                            target_qpos = direct_qpos
                             
-                            # Compute desired absolute robot tip targets
-                            target_robot_pos = self.robot_anchor + delta_robot
-                            
-                            # --- SAFETY BOUNDING BOX ---
-                            # Prevent the IK solver from exploding if the ArUco markers jump or human moves too far!
-                            # Workspace: X/Y within +/- 10cm, Z between +2cm and -15cm
-                            target_robot_pos[:, 0] = np.clip(target_robot_pos[:, 0], -0.1, 0.1)
-                            target_robot_pos[:, 1] = np.clip(target_robot_pos[:, 1], -0.1, 0.1)
-                            target_robot_pos[:, 2] = np.clip(target_robot_pos[:, 2], -0.15, 0.02)
-                            
-                            # 3. Solve Inverse Kinematics
-                            # retargeter.retarget() computes the optimized joint configuration
-                            target_qpos = self.retargeter.retarget(target_robot_pos)
-                            
-                            # 4. Apply Rate Limiting (Safety Clamp)
+                        if target_qpos is not None:
                             delta_q = target_qpos - self.last_qpos
                             delta_q = np.clip(delta_q, -MAX_JOINT_VEL, MAX_JOINT_VEL)
                             safe_qpos = self.last_qpos + delta_q
                             
-                            # Update command buffer
                             for i, aid in enumerate(self.actuator_ids):
                                 if aid != -1:
                                     self.data.ctrl[aid] = safe_qpos[i]
                                     
                             self.last_qpos = safe_qpos
                             
-                        elif not self.clutch_active and self.human_anchor is not None:
-                            # Clutch Just Released: clear anchors
-                            self.human_anchor = None
-                            self.robot_anchor = None
-                            logging.info("Clutched OUT.")
-                            
-                    # 5. Physics Integration
                     for _ in range(SUBSTEPS):
                         mujoco.mj_step(self.model, self.data)
                         
-                    # Sync viewer UI
                     viewer.sync()
                     
-                    # 6. Timing Lock (20 Hz Control Loop)
                     elapsed = time.time() - step_start
                     time_to_wait = (1.0 / CONTROL_HZ) - elapsed
                     if time_to_wait > 0:
@@ -234,4 +347,3 @@ class TeleopSystem:
 if __name__ == "__main__":
     system = TeleopSystem()
     system.run()
-

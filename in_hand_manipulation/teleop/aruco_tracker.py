@@ -10,10 +10,10 @@ class ArucoTracker:
     Tracks Thumb (0), Index (1), and Middle (2) fingers using cv2.solvePnP.
     Provides Exponential Moving Average (EMA) filtering and robustness to temporary occlusion.
     """
-    def __init__(self, marker_length=0.02, alpha=0.65, max_lost_frames=5):
+    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5):
         """
         Args:
-            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.02m = 20mm).
+            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.015m = 15mm).
             alpha (float): EMA filter coefficient. Higher = more responsive, Lower = more smoothed.
             max_lost_frames (int): Number of frames to predict with constant velocity before freezing.
         """
@@ -61,6 +61,13 @@ class ArucoTracker:
         """
         Starts the RealSense pipeline and retrieves the intrinsic calibration matrix.
         """
+        # Hardware reset to prevent "Frame didn't arrive within 5000" error
+        ctx = rs.context()
+        if len(ctx.devices) > 0:
+            logging.info("Resetting RealSense camera...")
+            ctx.devices[0].hardware_reset()
+            time.sleep(3) # Wait for camera to reconnect
+            
         profile = self.pipeline.start(self.config)
         
         # Retrieve camera intrinsics for precise metric 3D projection
@@ -102,16 +109,15 @@ class ArucoTracker:
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
         
         # Detect ArUco markers
-        corners, ids, rejected = cv2.aruco.detectMarkers(
-            gray, self.aruco_dict, parameters=self.aruco_params
-        )
+        detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+        corners, ids, rejected = detector.detectMarkers(gray)
 
         detected_ids = set()
         current_time = time.time()
 
         if ids is not None:
             for i in range(len(ids)):
-                m_id = ids[i][0]
+                m_id = int(np.ravel(ids)[i])
                 if m_id not in self.marker_ids:
                     continue
                 
@@ -175,7 +181,7 @@ class ArucoTracker:
         if ids is not None:
             cv2.aruco.drawDetectedMarkers(color_image, corners, ids)
             for i in range(len(ids)):
-                m_id = ids[i][0]
+                m_id = int(np.ravel(ids)[i])
                 if m_id in self.marker_ids:
                     success, rvec, tvec = cv2.solvePnP(
                         self.obj_points, corners[i][0], self.camera_matrix, self.dist_coeffs,
@@ -189,7 +195,7 @@ class ArucoTracker:
 if __name__ == "__main__":
     # Quick visual validation test
     logging.basicConfig(level=logging.INFO)
-    tracker = ArucoTracker(marker_length=0.02)
+    tracker = ArucoTracker(marker_length=0.015)
     tracker.start()
     
     try:

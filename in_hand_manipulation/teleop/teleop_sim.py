@@ -166,41 +166,28 @@ class TeleopSystem:
                             if self.human_anchor is None:
                                 self.human_anchor = human_pos.copy()
                                 self.robot_anchor = self.get_robot_tip_positions()
+                                
+                                # Tell Dex-Retargeting optimizer to start from the current robot pose!
+                                if hasattr(self.retargeter, 'set_qpos'):
+                                    self.retargeter.set_qpos(self.last_qpos)
+                                    
                                 logging.info("Clutched IN.")
                                 
                             # Calculate Cartesian delta in camera frame
                             delta_human = human_pos - self.human_anchor
                             
-                            # Marker 0 (Thumb) is responding opposite, so we invert its X and Y axes 
-                            # in the camera frame to mirror the pinch! (Leaving Z alone so up/down is still correct).
-                            delta_human[0, 0] = -delta_human[0, 0]  # Invert Cam X for Thumb
-                            delta_human[0, 1] = -delta_human[0, 1]  # Invert Cam Y for Thumb
-                            # Note: If it's still weird, you can change the - signs above!
-                            
                             # Transform to robot coordinate frame and scale
                             delta_robot = (delta_human @ R_CAM2ROB.T) * POSITION_SCALING
                             
-                            # Compute base targets before curl coupling
+                            # Compute desired absolute robot tip targets
                             target_robot_pos = self.robot_anchor + delta_robot
                             
-                            # --- IMPROVED CURL COUPLING HEURISTIC ---
-                            # To separate pinching from translating the whole hand, we compare the 
-                            # distance of each finger to the geometric center (centroid) of the fingers.
-                            anchor_center = np.mean(self.robot_anchor[:, :2], axis=0)
-                            current_center = np.mean(target_robot_pos[:, :2], axis=0)
-                            
-                            for i in range(3):
-                                # Distance to centroid at clutch-in
-                                d0 = np.linalg.norm(self.robot_anchor[i, :2] - anchor_center)
-                                # Distance to centroid right now
-                                d1 = np.linalg.norm(target_robot_pos[i, :2] - current_center)
-                                
-                                # If d1 < d0, fingers are pinching inward -> Z goes UP (+Z)
-                                # If d1 > d0, fingers are spreading outward -> Z goes DOWN (-Z)
-                                pinch_amount = (d0 - d1)
-                                
-                                # Inject this into the Z target to force a natural curl/extension
-                                target_robot_pos[i, 2] += pinch_amount * 1.8
+                            # --- SAFETY BOUNDING BOX ---
+                            # Prevent the IK solver from exploding if the ArUco markers jump or human moves too far!
+                            # Workspace: X/Y within +/- 10cm, Z between +2cm and -15cm
+                            target_robot_pos[:, 0] = np.clip(target_robot_pos[:, 0], -0.1, 0.1)
+                            target_robot_pos[:, 1] = np.clip(target_robot_pos[:, 1], -0.1, 0.1)
+                            target_robot_pos[:, 2] = np.clip(target_robot_pos[:, 2], -0.15, 0.02)
                             
                             # 3. Solve Inverse Kinematics
                             # retargeter.retarget() computes the optimized joint configuration

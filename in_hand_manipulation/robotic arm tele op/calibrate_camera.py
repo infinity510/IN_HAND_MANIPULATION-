@@ -65,7 +65,7 @@ def main():
         
         if ids is not None:
             for i in range(len(ids)):
-                if ids[i][0] == MARKER_ID:
+                if int(np.ravel(ids)[i]) == MARKER_ID:
                     marker_detected = True
                     cv2.aruco.drawDetectedMarkers(display_frame, corners, ids)
                     img_points = corners[i][0]

@@ -3,7 +3,7 @@ import numpy as np
 import time
 import logging
 import sys
-
+import os
 class WebcamArucoTracker:
     """
     ArUco-based 3D marker tracking using a standard USB Webcam.
@@ -84,18 +84,27 @@ class WebcamArucoTracker:
         if not self.cap.isOpened():
             raise Exception(f"Failed to open USB camera at index {self.camera_index}. Try changing camera_index!")
 
-        # Since we don't have RealSense hardware intrinsics, we approximate them based on a standard 640x480 webcam.
-        # This works perfectly fine for our teleoperation because any scaling error is absorbed by our POSITION_SCALING tuning factor in teleop_sim.py!
-        fx = 600.0
-        fy = 600.0
-        cx = 320.0
-        cy = 240.0
-        
-        self.camera_matrix = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float64)
+        # Check if a custom calibration file exists
+        calib_file = os.path.join(os.path.dirname(__file__), "camera_calib.npz")
+        if os.path.exists(calib_file):
+            data = np.load(calib_file)
+            self.camera_matrix = data['mtx']
+            self.dist_coeffs = data['dist']
+            logging.info("Loaded custom camera calibration from camera_calib.npz")
+        else:
+            # Approximate them based on a standard 640x480 webcam.
+            fx = 600.0
+            fy = 600.0
+            cx = 320.0
+            cy = 240.0
+            
+            self.camera_matrix = np.array([
+                [fx, 0, cx],
+                [0, fy, cy],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            self.dist_coeffs = np.zeros((4, 1))
+            logging.info("Using default approximate camera matrix.")
         
         logging.info(f"WebcamArucoTracker started successfully on camera {self.camera_index}.")
 

@@ -6,7 +6,7 @@ import logging
 import cv2
 from pynput import keyboard
 from dex_retargeting.retargeting_config import RetargetingConfig
-from aruco_tracker import ArucoTracker
+from webcam_aruco_tracker import WebcamArucoTracker
 import os
 
 logging.basicConfig(level=logging.INFO)
@@ -28,7 +28,9 @@ POSITION_SCALING = 1.5
 
 class TeleopSystem:
     def __init__(self):
-        self.tracker = ArucoTracker(marker_length=0.015)
+        # Using the new USB Webcam tracker. 
+        # Note: If your external USB webcam is not found, you may need to change camera_index=1 or 2
+        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
         self.tracker.start()
         
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
@@ -86,7 +88,7 @@ class TeleopSystem:
         
         # INITIALIZE TO A PINCHED 120-DEGREE TRIPOD GRASP
         initial_pose = [
-            ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
+            ("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
             ("gripper_f1m3_joint", 1.0), ("gripper_f1m4_joint", 1.0),
             ("gripper_f2m3_joint", 1.0), ("gripper_f2m4_joint", 1.0),
             ("gripper_f3m3_joint", 1.0), ("gripper_f3m4_joint", 1.0),
@@ -207,9 +209,9 @@ class TeleopSystem:
                                 r = np.linalg.norm(pt)
                                 
                                 # Distance from center -> Curl (m3, m4)
-                                # r ranges from ~0.02 (pinched) to ~0.07 (open)
-                                curl_i = 1.0 - (r - 0.02) * 20.0
-                                curl_i = np.clip(curl_i, -0.2, 1.2)
+                                # Tuning: r=0.02 (pinch) -> curl=1.7 (touching), r=0.06 (open) -> curl=0.7 (flat)
+                                curl_i = 1.7 - (r - 0.02) * 25.0
+                                curl_i = np.clip(curl_i, -0.2, 2.0)
                                 curls.append(curl_i)
                                 
                             # 4. Apply to joints
@@ -238,73 +240,70 @@ class TeleopSystem:
                                     except: pass
 
                         # ==========================================
-                        # ULTIMATE HYBRID MAPPING (Triggered by SPACEBAR)
+                        # DECOUPLED INDEPENDENT TELEOP MAPPING
                         # ==========================================
                         elif self.clutch_active and valid_tracking and not self.absolute_mode:
                             human_pos = np.array(human_pos)
-                            centroid = np.mean(human_pos, axis=0)
-                            centered = human_pos - centroid
                             
-                            # 1. Overall Hand Twist (Theta)
-                            p0, p1, p2 = centered[0, :2], centered[1, :2], centered[2, :2]
-                            v_human = p0 - (p1 + p2) / 2.0
-                            theta_hand = np.arctan2(v_human[1], v_human[0])
-                            
-                            # 2. Independent Finger Angles
-                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
-                            R_2d = np.array([[c, -s], [s, c]])
-                            aligned = np.zeros_like(centered)
-                            for i in range(3):
-                                aligned[i, :2] = R_2d @ centered[i, :2]
-                                
-                            finger_angles = []
-                            finger_spreads = []
-                            for i in range(3):
-                                pt = aligned[i, :2]
-                                finger_spreads.append(np.linalg.norm(pt))
-                                finger_angles.append(np.arctan2(pt[1], pt[0]))
+                            # Calculate centroid to safeguard against global palm/arm movement!
+                            current_centroid = np.mean(human_pos, axis=0)
+                            centered = human_pos - current_centroid
                             
                             # Initialization at Clutch-In
                             if self.human_anchor is None:
-                                self.human_anchor = human_pos.copy() # Just as a flag
-                                self.init_theta = theta_hand
-                                self.init_finger_angles = finger_angles
-                                # Record the robot's physical state at clutch-in to apply deltas to!
+                                # Anchor the CENTERED positions, not absolute world positions
+                                self.human_anchor = {i: centered[i].copy() for i in range(3)}
                                 self.init_robot_qpos = self.last_qpos.copy()
                                 
-                            # 3. Compute Joint Commands
                             target_qpos = self.init_robot_qpos.copy()
                             
-                            # Tripod Twist (m1): Delta from initial twist
-                            twist_delta = theta_hand - self.init_theta
-                            twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
-                            twist_delta *= 1.2 # Sensitivity
-                            
-                            for j_name in ["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]:
+                            # Keep base yaw joints (m1) locked in static tripod
+                            for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
                                 try:
                                     idx = self.joint_names.index(j_name)
-                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + twist_delta, -1.0, 1.0)
+                                    target_qpos[idx] = base_val
                                 except: pass
                                 
-                            # Sway (m2): Delta from initial finger angles
+                            # Local spoke angles for Finger 1, 2, 3 (Matches the URDF physical mounting perfectly)
+                            spoke_angles = [0.0, 2.094395, -2.094395]
+                            
                             for i, f_idx in enumerate([1, 2, 3]):
-                                angle_delta = finger_angles[i] - self.init_finger_angles[i]
-                                angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
+                                # Delta is based on the CENTERED position. 
+                                # If the palm moves, centered[] doesn't change, so delta is 0! (Immune to arm movement)
+                                delta_human = centered[i] - self.human_anchor[i]
                                 
+                                # Noise Gate (Deadband filter)
+                                if np.linalg.norm(delta_human) < 0.0015:
+                                    delta_human = np.zeros(3)
+                                    
+                                delta_robot = (R_CAM2ROB @ delta_human) * POSITION_SCALING
+                                dx, dy, dz = delta_robot
+                                
+                                # Project into local spoke frame
+                                # Robot resting spoke angles (Matched to URDF)
+                                spoke_angles = [0.0, 2.094395, -2.094395]
+                                theta = spoke_angles[i]
+                                c, s = np.cos(theta), np.sin(theta)
+                                
+                                delta_outward = dx * c + dy * s
+                                delta_lateral = dx * (-s) + dy * c
+                                delta_inward = -delta_outward
+                                
+                                # Joint Mapping Tuning (Increased sensitivity for faster response)
+                                sway_delta = delta_lateral * 8.0  
+                                curl_delta = delta_inward * 25.0 + dz * 15.0 
+                                
+                                # Apply lateral/horizontal displacements to Sway (m2)
                                 try:
                                     idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
+                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + sway_delta, -0.6, 0.6)
                                 except: pass
                                 
-                                # Curl (m3, m4): Absolute spread mapping (Flawless Pinch)
-                                r = finger_spreads[i]
-                                curl_i = 1.0 - (r - 0.02) * 20.0
-                                curl_i = np.clip(curl_i, -0.2, 1.2)
-                                
+                                # Apply vertical/inward displacements to Curl (m3, m4)
                                 for m_idx in [3, 4]:
                                     try:
                                         idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
-                                        target_qpos[idx] = curl_i
+                                        target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + curl_delta, -0.2, 2.2)
                                     except: pass
                                 
                         elif not self.clutch_active:

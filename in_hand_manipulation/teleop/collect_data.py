@@ -26,7 +26,7 @@ R_CAM2ROB = np.array([
 
 class TeleopSystem:
     def __init__(self):
-        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
+        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4, alpha=1.0)
         self.tracker.start()
         
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
@@ -283,7 +283,7 @@ class TeleopSystem:
                 
                 if target_qpos is not None:
                     delta_q = target_qpos - self.last_qpos
-                    target_qpos = self.last_qpos + np.clip(delta_q, -0.2, 0.2)
+                    target_qpos = self.last_qpos + np.clip(delta_q, -0.5, 0.5)
                     self.last_qpos = target_qpos
                     
                     for i, name in enumerate(self.joint_names):

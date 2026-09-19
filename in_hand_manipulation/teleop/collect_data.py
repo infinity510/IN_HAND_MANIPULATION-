@@ -115,9 +115,9 @@ class TeleopSystem:
         
         initial_pose = [
             ("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
-            ("gripper_f1m3_joint", 1.0), ("gripper_f1m4_joint", 1.0),
-            ("gripper_f2m3_joint", 1.0), ("gripper_f2m4_joint", 1.0),
-            ("gripper_f3m3_joint", 1.0), ("gripper_f3m4_joint", 1.0),
+            ("gripper_f1m3_joint", 0.8), ("gripper_f1m4_joint", 0.8),
+            ("gripper_f2m3_joint", 0.8), ("gripper_f2m4_joint", 0.8),
+            ("gripper_f3m3_joint", 0.8), ("gripper_f3m4_joint", 0.8),
         ]
         
         for i in range(self.model.nu):

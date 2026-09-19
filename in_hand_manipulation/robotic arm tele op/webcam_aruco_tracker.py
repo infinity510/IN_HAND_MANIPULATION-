@@ -43,6 +43,7 @@ class WebcamArucoTracker:
         self.state = {
             m_id: {
                 'pos_filtered': None,
+                'rotation_matrix': None,
                 'vel': np.zeros(3),
                 'lost_frames': 0,
                 'last_time': None,
@@ -53,6 +54,7 @@ class WebcamArucoTracker:
         self.cap = None
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1))
+        self.rotation_matrices = {m_id: None for m_id in self.marker_ids}
 
     def start(self):
         """
@@ -145,7 +147,9 @@ class WebcamArucoTracker:
                 
                 if success:
                     pos_raw = tvec.flatten()
+                    rotation_matrix, _ = cv2.Rodrigues(rvec)
                     state = self.state[m_id]
+                    state['rotation_matrix'] = rotation_matrix
                     
                     if state['pos_filtered'] is None or state['is_frozen']:
                         # Reset filter on first detection or recovery from frozen state
@@ -190,6 +194,13 @@ class WebcamArucoTracker:
                 tracking_out[m_id] = state['pos_filtered'].copy()
             else:
                 tracking_out[m_id] = None
+
+        # Rotation is the marker-to-camera orientation from solvePnP.
+        self.rotation_matrices = {
+            m_id: self.state[m_id]['rotation_matrix'].copy()
+            if self.state[m_id]['rotation_matrix'] is not None else None
+            for m_id in self.marker_ids
+        }
                 
         # Optional: draw axes and markers for visual debugging
         if ids is not None:

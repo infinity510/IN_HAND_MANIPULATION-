@@ -11,7 +11,8 @@ import os
 
 logging.basicConfig(level=logging.INFO)
 
-SCENE_XML = os.path.join(os.path.dirname(__file__), "../simulation/scene.xml")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCENE_XML = os.path.join(SCRIPT_DIR, "../simulation/gripper_only.xml")
 RETARGET_YML = os.path.join(os.path.dirname(__file__), "delto_3f_retarget.yml")
 
 CONTROL_HZ = 20

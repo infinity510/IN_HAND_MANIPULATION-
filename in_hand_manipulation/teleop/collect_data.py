@@ -13,7 +13,9 @@ from scipy.spatial.transform import Rotation as R
 logging = __import__("logging")
 logging.basicConfig(level=logging.INFO)
 
-SCENE_XML = "../simulation/scene_cube.xml"
+import os
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCENE_XML = os.path.join(SCRIPT_DIR, "../simulation/scene_cube.xml")
 POSITION_SCALING = 1.5
 
 R_CAM2ROB = np.array([

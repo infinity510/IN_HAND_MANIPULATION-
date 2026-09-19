@@ -136,7 +136,7 @@ class TeleopSystem:
                 
         # Set cube to perfect grasp position
         try:
-            cube_idx = self.model.jnt_qposadr[self.model.joint("free").id]
+            cube_idx = self.model.jnt_qposadr[self.model.joint("cube_joint").id]
             self.data.qpos[cube_idx:cube_idx+7] = [0.0, 0.0, 0.08, 1.0, 0.0, 0.0, 0.0]
             self.data.qvel[:] = 0.0
         except Exception as e:
@@ -304,13 +304,13 @@ class TeleopSystem:
                     
                 # Extract Cube Pose for Display
                 try:
-                    cube_idx = self.model.jnt_qposadr[self.model.joint("free").id]
+                    cube_idx = self.model.jnt_qposadr[self.model.joint("cube_joint").id]
                     quat = self.data.qpos[cube_idx+3:cube_idx+7]
                     euler = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz', degrees=True)
                     contact_msg = "TOUCHING" if self.data.ncon > 0 else "NO CONTACT"
                     overlay_text = f"Cube Roll/Pitch/Yaw:\n{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}\nStatus: {contact_msg}"
-                except:
-                    overlay_text = "Cube not found"
+                except Exception as e:
+                    overlay_text = f"Cube Error:\n{e}\n"
                     
                 # Highlight contacts in RED
                 viewer.user_scn.ngeom = 0

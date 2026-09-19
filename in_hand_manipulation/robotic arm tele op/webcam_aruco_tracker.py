@@ -3,14 +3,15 @@ import numpy as np
 import time
 import logging
 import sys
-
+import os
+from scipy.spatial.transform import Rotation as R_scipy
 class WebcamArucoTracker:
     """
     ArUco-based 3D marker tracking using a standard USB Webcam.
     Tracks Thumb (0), Index (1), and Middle (2) fingers using cv2.solvePnP.
     Provides Exponential Moving Average (EMA) filtering and robustness to temporary occlusion.
     """
-    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5, camera_index=0):
+    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5, camera_index=1):
         """
         Args:
             marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.015m = 15mm).
@@ -36,14 +37,22 @@ class WebcamArucoTracker:
             [-l, -l, 0]
         ], dtype=np.float32)
 
-        # State tracking for the 3 target markers: 0=Thumb, 1=Index, 2=Middle
-        self.marker_ids = [0, 1, 2]
+        # State tracking for the target marker: 0 (the tip of the robotic arm)
+        self.marker_ids = [0]
         
+        # Camera to Robot base transformation matrix (from user's picture)
+        self.R_cam2robot = np.array([
+            [ 0, -1,  0],
+            [-1,  0,  0],
+            [ 0,  0, -1]
+        ], dtype=np.float64)
+
         # Initialize tracking state
         self.state = {
             m_id: {
                 'pos_filtered': None,
                 'rotation_matrix': None,
+                'euler_angles': None,
                 'vel': np.zeros(3),
                 'lost_frames': 0,
                 'last_time': None,
@@ -55,6 +64,7 @@ class WebcamArucoTracker:
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1))
         self.rotation_matrices = {m_id: None for m_id in self.marker_ids}
+        self.euler_angles = {m_id: None for m_id in self.marker_ids}
 
     def start(self):
         """
@@ -86,18 +96,27 @@ class WebcamArucoTracker:
         if not self.cap.isOpened():
             raise Exception(f"Failed to open USB camera at index {self.camera_index}. Try changing camera_index!")
 
-        # Since we don't have RealSense hardware intrinsics, we approximate them based on a standard 640x480 webcam.
-        # This works perfectly fine for our teleoperation because any scaling error is absorbed by our POSITION_SCALING tuning factor in teleop_sim.py!
-        fx = 600.0
-        fy = 600.0
-        cx = 320.0
-        cy = 240.0
-        
-        self.camera_matrix = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float64)
+        # Check if a custom calibration file exists
+        calib_file = os.path.join(os.path.dirname(__file__), "camera_calib.npz")
+        if os.path.exists(calib_file):
+            data = np.load(calib_file)
+            self.camera_matrix = data['mtx']
+            self.dist_coeffs = data['dist']
+            logging.info("Loaded custom camera calibration from camera_calib.npz")
+        else:
+            # Approximate them based on a standard 640x480 webcam.
+            fx = 600.0
+            fy = 600.0
+            cx = 320.0
+            cy = 240.0
+            
+            self.camera_matrix = np.array([
+                [fx, 0, cx],
+                [0, fy, cy],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            self.dist_coeffs = np.zeros((5, 1))
+            logging.info("Using default approximate camera matrix.")
         
         logging.info(f"WebcamArucoTracker started successfully on camera {self.camera_index}.")
 
@@ -146,10 +165,18 @@ class WebcamArucoTracker:
                 )
                 
                 if success:
-                    pos_raw = tvec.flatten()
-                    rotation_matrix, _ = cv2.Rodrigues(rvec)
+                    pos_cam = tvec.flatten()
+                    rot_cam, _ = cv2.Rodrigues(rvec)
+                    
+                    # Transform to robot base frame
+                    pos_raw = self.R_cam2robot @ pos_cam
+                    rotation_matrix = self.R_cam2robot @ rot_cam
+                    
                     state = self.state[m_id]
                     state['rotation_matrix'] = rotation_matrix
+                    
+                    # Compute Euler angles (Roll-Pitch-Yaw / XYZ) for Piper-X
+                    state['euler_angles'] = R_scipy.from_matrix(rotation_matrix).as_euler('xyz', degrees=False)
                     
                     if state['pos_filtered'] is None or state['is_frozen']:
                         # Reset filter on first detection or recovery from frozen state
@@ -191,14 +218,21 @@ class WebcamArucoTracker:
         for m_id in self.marker_ids:
             state = self.state[m_id]
             if state['pos_filtered'] is not None and not state['is_frozen']:
-                tracking_out[m_id] = state['pos_filtered'].copy()
+                # 6D vector: [x, y, z, rx, ry, rz]
+                pose_6d = np.concatenate([state['pos_filtered'], state['euler_angles']])
+                tracking_out[m_id] = pose_6d
             else:
                 tracking_out[m_id] = None
 
-        # Rotation is the marker-to-camera orientation from solvePnP.
+        # Store attributes for external access
         self.rotation_matrices = {
             m_id: self.state[m_id]['rotation_matrix'].copy()
             if self.state[m_id]['rotation_matrix'] is not None else None
+            for m_id in self.marker_ids
+        }
+        self.euler_angles = {
+            m_id: self.state[m_id]['euler_angles'].copy()
+            if self.state[m_id]['euler_angles'] is not None else None
             for m_id in self.marker_ids
         }
                 
@@ -222,7 +256,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Default to the first available camera on Windows and the first USB webcam on Linux.
-    tracker = WebcamArucoTracker(marker_length=0.015, camera_index=0)
+    tracker = WebcamArucoTracker(marker_length=0.015, camera_index=1)
     tracker.start()
     
     try:
@@ -232,9 +266,9 @@ if __name__ == "__main__":
                 # Print positions to console
                 status = []
                 for m_id in tracker.marker_ids:
-                    pos = positions.get(m_id)
-                    if pos is not None:
-                        status.append(f"M{m_id}: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
+                    pose_6d = positions.get(m_id)
+                    if pose_6d is not None:
+                        status.append(f"M{m_id}: P[{pose_6d[0]:.3f}, {pose_6d[1]:.3f}, {pose_6d[2]:.3f}] E[{pose_6d[3]:.2f}, {pose_6d[4]:.2f}, {pose_6d[5]:.2f}]")
                     else:
                         status.append(f"M{m_id}: LOST")
                 print(" | ".join(status), end="\r")

@@ -31,7 +31,7 @@ class TeleopSystem:
     def __init__(self):
         # Using the new USB Webcam tracker. 
         # Note: If your external USB webcam is not found, you may need to change camera_index=1 or 2
-        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
+        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=1)
         self.tracker.start()
         
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)

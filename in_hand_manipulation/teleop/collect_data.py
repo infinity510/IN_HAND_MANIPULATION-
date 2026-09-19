@@ -26,7 +26,7 @@ R_CAM2ROB = np.array([
 
 class TeleopSystem:
     def __init__(self):
-        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4, alpha=1.0)
+        self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=1, alpha=1.0)
         self.tracker.start()
         
         self.model = mujoco.MjModel.from_xml_path(SCENE_XML)

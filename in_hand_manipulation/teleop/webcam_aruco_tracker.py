@@ -9,7 +9,7 @@ class WebcamArucoTracker:
     Tracks Thumb (0), Index (1), and Middle (2) fingers using cv2.solvePnP.
     Provides Exponential Moving Average (EMA) filtering and robustness to temporary occlusion.
     """
-    def __init__(self, marker_length=0.08, alpha=0.65, max_lost_frames=5, camera_index=0):
+    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5, camera_index=0):
         """
         Args:
             marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.015m = 15mm).
@@ -202,7 +202,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Try index 4 which corresponds to the newly plugged in /dev/video4
-    tracker = WebcamArucoTracker(marker_length=0.08, camera_index=4)
+    tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
     tracker.start()
     
     try:

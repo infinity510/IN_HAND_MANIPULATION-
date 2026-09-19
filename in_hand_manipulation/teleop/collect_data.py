@@ -60,8 +60,16 @@ class TeleopSystem:
             if key == keyboard.Key.space:
                 if not self.clutch_active:
                     self.clutch_active = True
+                    logging.info("Clutch ENGAGED")
+            elif key.char == 'c':
+                if not self.is_recording:
                     self.is_recording = True
-                    logging.info("Clutch ENGAGED - RECORDING STARTED")
+                    logging.info("RECORDING STARTED")
+                else:
+                    if self.is_recording:
+                        self.save_episode()
+                    self.is_recording = False
+                    logging.info("RECORDING STOPPED & SAVED")
             elif key.char == 'o':
                 self.absolute_mode = True
                 logging.info("Absolute Mode ENABLED")
@@ -74,11 +82,8 @@ class TeleopSystem:
         try:
             if key == keyboard.Key.space:
                 self.clutch_active = False
-                if self.is_recording:
-                    self.save_episode()
-                self.is_recording = False
                 self.human_anchor = None
-                logging.info("Clutch RELEASED - RECORDING SAVED")
+                logging.info("Clutch RELEASED")
             elif key.char == 'o':
                 self.absolute_mode = False
                 logging.info("Absolute Mode DISABLED")
@@ -286,11 +291,14 @@ class TeleopSystem:
                         except ValueError:
                             pass
                             
-                # Record Step if Recording
+                # Record Step if Recording (Downsampled to ~50 Hz for manageable dataset sizes)
                 if self.is_recording:
-                    self.episode_data['qpos'].append(self.data.qpos.copy())
-                    self.episode_data['qvel'].append(self.data.qvel.copy())
-                    self.episode_data['action'].append(self.data.ctrl.copy())
+                    current_time = time.time()
+                    if not hasattr(self, 'last_record_time') or (current_time - self.last_record_time) >= 0.02:
+                        self.episode_data['qpos'].append(self.data.qpos.copy())
+                        self.episode_data['qvel'].append(self.data.qvel.copy())
+                        self.episode_data['action'].append(self.data.ctrl.copy())
+                        self.last_record_time = current_time
                     
                 # Extract Cube Pose for Display
                 try:

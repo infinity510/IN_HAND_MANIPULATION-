@@ -137,7 +137,7 @@ class TeleopSystem:
         # Set cube to perfect grasp position
         try:
             cube_idx = self.model.jnt_qposadr[self.model.joint("cube_joint").id]
-            self.data.qpos[cube_idx:cube_idx+7] = [0.0, 0.0, 0.09, 1.0, 0.0, 0.0, 0.0]
+            self.data.qpos[cube_idx:cube_idx+7] = [0.0, 0.0, 0.08, 1.0, 0.0, 0.0, 0.0]
             self.data.qvel[:] = 0.0
         except Exception as e:
             pass

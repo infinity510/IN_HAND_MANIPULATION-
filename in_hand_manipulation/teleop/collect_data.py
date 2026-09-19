@@ -337,7 +337,11 @@ class TeleopSystem:
                     cv2.imshow("Aruco Tracking", color_image)
                     cv2.waitKey(1)
                     
-                mujoco.mj_step(self.model, self.data)
+                # Step physics forward to match webcam frame rate (approx 30Hz)
+                # 0.033s / 0.002s timestep ~= 16 steps. We use 25 for a slight speedup
+                for _ in range(25):
+                    mujoco.mj_step(self.model, self.data)
+                    
                 viewer.sync()
                 
                 time_until_next_step = self.model.opt.timestep - (time.time() - step_start)

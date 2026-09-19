@@ -76,7 +76,7 @@ class WebcamArucoTracker:
         
         # FIX LATENCY: Reduce buffer size to 1 so we always get the freshest frame, not a queued old one
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_FPS, 60)
         
         # Give camera a moment to warm up
         time.sleep(1.0)

@@ -9,7 +9,7 @@ class WebcamArucoTracker:
     Tracks Thumb (0), Index (1), and Middle (2) fingers using cv2.solvePnP.
     Provides Exponential Moving Average (EMA) filtering and robustness to temporary occlusion.
     """
-    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5, camera_index=0):
+    def __init__(self, marker_length=0.08, alpha=0.65, max_lost_frames=5, camera_index=0):
         """
         Args:
             marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.015m = 15mm).
@@ -58,11 +58,16 @@ class WebcamArucoTracker:
         Starts the USB webcam pipeline and sets up approximate intrinsic calibration.
         """
         logging.info(f"Connecting to USB camera index {self.camera_index}...")
-        self.cap = cv2.VideoCapture(self.camera_index)
+        # Initialize VideoCapture with V4L2 backend for Linux performance
+        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_V4L2)
         
         # Try to force 640x480 resolution for consistency and performance
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        
+        # FIX LATENCY: Reduce buffer size to 1 so we always get the freshest frame, not a queued old one
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
         
         # Give camera a moment to warm up
         time.sleep(1.0)
@@ -197,7 +202,7 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     
     # Try index 4 which corresponds to the newly plugged in /dev/video4
-    tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
+    tracker = WebcamArucoTracker(marker_length=0.08, camera_index=4)
     tracker.start()
     
     try:

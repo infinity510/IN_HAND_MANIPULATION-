@@ -96,6 +96,8 @@ The recorded `episode_YYYYMMDD_HHMMSS.hdf5` files are heavily decoupled from MuJ
 
 The ultimate goal is to train a policy network in NVIDIA Isaac Sim.
 1. **Behavioral Cloning (IL):** Write a PyTorch Dataloader to read the HDF5 files. Train a network to predict `action` given `(robot_qpos, robot_qvel, object_pos, object_quat, target_quat)`.
+1. **Behavioral Cloning (IL):** Write a PyTorch Dataloader to read the HDF5 files. Train a network to predict `action` given `(robot_qpos, robot_qvel, object_pos, object_quat, target_quat, object_id_one_hot)`. 
+*(Note: `object_id_one_hot` is a 5-dimensional one-hot encoded vector representing the `object_id` from the episode metadata, ensuring the policy generalizes across different shapes.)*
 2. **RL Fine-Tuning:** Deploy the pre-trained BC policy into an Isaac Sim Articulation environment. Use Reinforcement Learning (e.g., PPO via OmniIsaacGymEnvs) to fine-tune the policy to achieve the `target_quat` robustly, rewarding minimal distance to the goal orientation.
 
 ---

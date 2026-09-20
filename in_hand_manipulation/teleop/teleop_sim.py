@@ -20,13 +20,6 @@ SIM_HZ = 500
 SUBSTEPS = SIM_HZ // CONTROL_HZ
 MAX_JOINT_VEL = 0.5 
 
-R_CAM2ROB = np.array([
-    [ 0, -1,  0],  
-    [-1,  0,  0],  
-    [ 0,  0, -1]   
-])
-POSITION_SCALING = 1.5  
-
 class TeleopSystem:
     def __init__(self):
         # Using the new USB Webcam tracker. 

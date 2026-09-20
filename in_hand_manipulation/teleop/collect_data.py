@@ -18,14 +18,6 @@ logging.basicConfig(level=logging.INFO)
 import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCENE_XML = os.path.join(SCRIPT_DIR, "../simulation/scene_cube.xml")
-POSITION_SCALING = 1.5
-
-R_CAM2ROB = np.array([
-    [ 0, -1,  0],  
-    [-1,  0,  0],  
-    [ 0,  0, -1]   
-])
-
 class TeleopSystem:
     def __init__(self):
         self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=1, alpha=1.0)

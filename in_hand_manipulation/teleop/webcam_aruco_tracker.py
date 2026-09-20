@@ -24,6 +24,12 @@ class WebcamArucoTracker:
         # ArUco Configuration
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters()
+        
+        # Optimize for fast motion and small markers
+        self.aruco_params.minMarkerPerimeterRate = 0.015
+        self.aruco_params.maxErroneousBitsInBorderRate = 0.35
+        self.aruco_params.errorCorrectionRate = 1.0
+        
         self.marker_length = marker_length
         self.alpha = alpha
         self.max_lost_frames = max_lost_frames
@@ -37,8 +43,8 @@ class WebcamArucoTracker:
             [-l, -l, 0]
         ], dtype=np.float32)
 
-        # State tracking for the 3 target markers: 0=Thumb, 1=Index, 2=Middle
-        self.marker_ids = [0, 1, 2]
+        # State tracking for the target markers: 0=Thumb, 1=Index, 2=Middle, 3=Wrist (Anchor)
+        self.marker_ids = [0, 1, 2, 3]
         
         # Initialize tracking state
         self.state = {
@@ -87,6 +93,7 @@ class WebcamArucoTracker:
         
         # Turn off auto-exposure and auto-focus which can drastically drop framerate in low light
         self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1) # 1 = Manual for some cameras (V4L2 uses 1 for manual, 3 for auto)
+        self.cap.set(cv2.CAP_PROP_EXPOSURE, 100)    # Explicit fast shutter speed to kill motion blur
         self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         
         # Give camera a moment to warm up

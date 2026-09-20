@@ -82,48 +82,46 @@
         <!-- Object 1: Cylinder -->
     <body name="obj_1" pos="10 0 0.1">
       <freejoint name="obj_1_joint"/>
-      <geom name="obj_1_geom" type="cylinder" size="0.045 0.07" mass="0.5" rgba="1 0 0 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
+      <geom name="obj_1_geom" type="cylinder" size="0.045 0.07" mass="1.0" rgba="1 0 0 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
       <geom name="obj_1_marker" type="box" size="0.01 0.01 0.01" pos="0 0 0.07" rgba="0 0 0 1" contype="0" conaffinity="0"/>
     </body>
     <!-- Object 2: Capsule (substitute for cone) -->
     <body name="obj_2" pos="11 0 0.1">
       <freejoint name="obj_2_joint"/>
-      <geom name="obj_2_geom" type="capsule" size="0.025 0.045" mass="0.5" rgba="0 1 0 1" friction="1 0.005 0.0001" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
+      <geom name="obj_2_geom" type="capsule" size="0.025 0.045" mass="1.0" rgba="0 1 0 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
       <geom name="obj_2_marker" type="box" size="0.01 0.01 0.01" pos="0 0 0.07" rgba="0 0 0 1" contype="0" conaffinity="0"/>
     </body>
     <!-- Object 3: Cube -->
     <body name="obj_3" pos="12 0 0.1">
       <freejoint name="obj_3_joint"/>
-      <geom name="obj_3_geom" type="box" size="0.045 0.045 0.045" mass="0.5" rgba="0 0 1 1" friction="1 0.005 0.0001" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
+      <geom name="obj_3_geom" type="box" size="0.045 0.045 0.045" mass="1.0" rgba="0 0 1 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
       <geom name="obj_3_marker" type="box" size="0.01 0.01 0.01" pos="0 0 0.045" rgba="0 0 0 1" contype="0" conaffinity="0"/>
     </body>
     <!-- Object 4: Cuboid -->
     <body name="obj_4" pos="13 0 0.1">
       <freejoint name="obj_4_joint"/>
-      <geom name="obj_4_geom" type="box" size="0.035 0.035 0.07" mass="0.5" rgba="1 1 0 1" friction="1 0.005 0.0001" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
+      <geom name="obj_4_geom" type="box" size="0.055 0.035 0.07" mass="1.0" rgba="1 1 0 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
       <geom name="obj_4_marker" type="box" size="0.01 0.01 0.01" pos="0 0 0.07" rgba="0 0 0 1" contype="0" conaffinity="0"/>
     </body>
     <!-- Object 5: Sphere -->
     <body name="obj_5" pos="14 0 0.1">
       <freejoint name="obj_5_joint"/>
-      <geom name="obj_5_geom" type="sphere" size="0.065" mass="0.5" rgba="1 0 1 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
+      <geom name="obj_5_geom" type="sphere" size="0.065" mass="1.0" rgba="1 0 1 1" friction="3.0 0.05 0.005" contype="0" conaffinity="1" solimp="0.99 0.99 0.001" solref="0.002 1"/>
       <geom name="obj_5_marker" type="box" size="0.01 0.01 0.01" pos="0 0 0.065" rgba="0 0 0 1" contype="0" conaffinity="0"/>
     </body>
   </worldbody>
 <actuator>
-    <position name="act_f1m1" joint="gripper_f1m1_joint" kp="15" kv="1"/>
-    <position name="act_f1m2" joint="gripper_f1m2_joint" kp="15" kv="1"/>
-    <position name="act_f1m3" joint="gripper_f1m3_joint" kp="15" kv="1"/>
-    <position name="act_f1m4" joint="gripper_f1m4_joint" kp="15" kv="1"/>
-    
-    <position name="act_f2m1" joint="gripper_f2m1_joint" kp="15" kv="1"/>
-    <position name="act_f2m2" joint="gripper_f2m2_joint" kp="15" kv="1"/>
-    <position name="act_f2m3" joint="gripper_f2m3_joint" kp="15" kv="1"/>
-    <position name="act_f2m4" joint="gripper_f2m4_joint" kp="15" kv="1"/>
-    
-    <position name="act_f3m1" joint="gripper_f3m1_joint" kp="15" kv="1"/>
-    <position name="act_f3m2" joint="gripper_f3m2_joint" kp="15" kv="1"/>
-    <position name="act_f3m3" joint="gripper_f3m3_joint" kp="15" kv="1"/>
-    <position name="act_f3m4" joint="gripper_f3m4_joint" kp="15" kv="1"/>
+    <position name="act_f1m1" joint="gripper_f1m1_joint" kp="20" kv="1.5"/>
+    <position name="act_f1m2" joint="gripper_f1m2_joint" kp="20" kv="1.5"/>
+    <position name="act_f1m3" joint="gripper_f1m3_joint" kp="20" kv="1.5"/>
+    <position name="act_f1m4" joint="gripper_f1m4_joint" kp="20" kv="1.5"/>
+    <position name="act_f2m1" joint="gripper_f2m1_joint" kp="20" kv="1.5"/>
+    <position name="act_f2m2" joint="gripper_f2m2_joint" kp="20" kv="1.5"/>
+    <position name="act_f2m3" joint="gripper_f2m3_joint" kp="20" kv="1.5"/>
+    <position name="act_f2m4" joint="gripper_f2m4_joint" kp="20" kv="1.5"/>
+    <position name="act_f3m1" joint="gripper_f3m1_joint" kp="20" kv="1.5"/>
+    <position name="act_f3m2" joint="gripper_f3m2_joint" kp="20" kv="1.5"/>
+    <position name="act_f3m3" joint="gripper_f3m3_joint" kp="20" kv="1.5"/>
+    <position name="act_f3m4" joint="gripper_f3m4_joint" kp="20" kv="1.5"/>
   </actuator>
 </mujoco>

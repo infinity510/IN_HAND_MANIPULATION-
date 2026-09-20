@@ -1,5 +1,3 @@
-## safe pt
-
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -18,6 +16,7 @@ logging.basicConfig(level=logging.INFO)
 import os
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SCENE_XML = os.path.join(SCRIPT_DIR, "../simulation/scene_cube.xml")
+
 class TeleopSystem:
     def __init__(self):
         self.tracker = WebcamArucoTracker(marker_length=0.015, camera_index=1, alpha=1.0)
@@ -107,7 +106,15 @@ class TeleopSystem:
             # Hindsight Labeling: The final orientation achieved is treated as the goal
             final_quat = self.episode_data['object_quat'][-1]
             
-            filename = f"data/episode_{datetime.now().strftime('%Y%m%d_%H%M%S')}.hdf5"
+            obj_names_map = {1: 'cylinder', 2: 'capsule', 3: 'cube', 4: 'cuboid', 5: 'sphere'}
+            obj_name = obj_names_map.get(self.active_object, 'unknown')
+            
+            while True:
+                filename = f"data/{obj_name}_{self.episode_counter}.hdf5"
+                if not os.path.exists(filename):
+                    break
+                self.episode_counter += 1
+                
             with h5py.File(filename, 'w') as f:
                 f.create_dataset('robot_qpos', data=np.array(self.episode_data['robot_qpos']))
                 f.create_dataset('robot_qvel', data=np.array(self.episode_data['robot_qvel']))
@@ -210,11 +217,15 @@ class TeleopSystem:
                             valid_tracking = False
                             break
                         human_pos.append(pos)
+                        
+                    wrist_pos = tracking_out.get(3)
+                    if wrist_pos is None:
+                        valid_tracking = False
                     
                     if valid_tracking:
                         if self.absolute_mode:
                             human_pos = np.array(human_pos)
-                            centroid = np.mean(human_pos, axis=0)
+                            centroid = wrist_pos
                             centered = human_pos - centroid
                             
                             p0 = centered[0, :2]
@@ -262,7 +273,7 @@ class TeleopSystem:
 
                         elif self.clutch_active:
                             human_pos = np.array(human_pos)
-                            current_centroid = np.mean(human_pos, axis=0)
+                            current_centroid = wrist_pos
                             centered = human_pos - current_centroid
                             
                             p0, p1, p2 = centered[0, :2], centered[1, :2], centered[2, :2]

@@ -46,7 +46,11 @@ IN_HAND_MANIPULATION-main/
 ## 3. Hardware & Teleoperation
 
 The teleoperation system uses a standard 640x480 USB Webcam running at 60fps.
-* **Markers:** 3 ArUco markers (IDs 0, 1, 2) from `DICT_4X4_50` (15mm length).
+* **Markers:** 4 ArUco markers from `DICT_4X4_50` (15mm length).
+    * `ID 0`: Thumb tip
+    * `ID 1`: Index tip
+    * `ID 2`: Middle tip
+    * `ID 3`: Wrist / Palm (Used as the absolute origin to perfectly decouple finger movements).
 * **Tracking (`webcam_aruco_tracker.py`):** Uses a background daemon thread (`_update_frame`) with a `threading.Lock` to continuously fetch the absolute latest frame from the webcam. This bypasses OpenCV's internal queue buffer, ensuring **zero-latency** state updates for the physics simulation.
 * **Mapping:** The 2D/3D positions of the markers on the human fingers are retargeted to the joint angles of the simulated Tesollo hand.
 

@@ -2,17 +2,19 @@ import cv2
 import numpy as np
 import time
 import logging
-
+import sys
+import os
+from scipy.spatial.transform import Rotation as R_scipy
 class WebcamArucoTracker:
     """
     ArUco-based 3D marker tracking using a standard USB Webcam.
     Tracks Thumb (0), Index (1), and Middle (2) fingers using cv2.solvePnP.
     Provides Exponential Moving Average (EMA) filtering and robustness to temporary occlusion.
     """
-    def __init__(self, marker_length=0.015, alpha=0.65, max_lost_frames=5, camera_index=0):
+    def __init__(self, marker_length=0.093, alpha=0.65, max_lost_frames=5, camera_index=1):
         """
         Args:
-            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.015m = 15mm).
+            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.093m = 15mm).
             alpha (float): EMA filter coefficient. Higher = more responsive, Lower = more smoothed.
             max_lost_frames (int): Number of frames to predict with constant velocity before freezing.
             camera_index (int): USB camera index. Usually 0 for laptop webcam, 1 or 2 for external USB webcams.
@@ -35,13 +37,22 @@ class WebcamArucoTracker:
             [-l, -l, 0]
         ], dtype=np.float32)
 
-        # State tracking for the 3 target markers: 0=Thumb, 1=Index, 2=Middle
-        self.marker_ids = [0, 1, 2]
+        # State tracking for the target marker: 0 (the tip of the robotic arm)
+        self.marker_ids = [0]
         
+        # Camera to Robot base transformation matrix (from user's picture)
+        self.R_cam2robot = np.array([
+            [ 0, 0,  -1],
+            [ 1,  0,  0],
+            [ 0,  -1, 0]
+        ], dtype=np.float64)
+
         # Initialize tracking state
         self.state = {
             m_id: {
                 'pos_filtered': None,
+                'rotation_matrix': None,
+                'euler_angles': None,
                 'vel': np.zeros(3),
                 'lost_frames': 0,
                 'last_time': None,
@@ -52,14 +63,39 @@ class WebcamArucoTracker:
         self.cap = None
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1))
+        self.rotation_matrices = {m_id: None for m_id in self.marker_ids}
+        self.euler_angles = {m_id: None for m_id in self.marker_ids}
+        self.origin_transform = None
+
+    def set_origin(self):
+        """Sets the current pose of the primary marker as the global origin."""
+        m_id = self.marker_ids[0]
+        state = self.state[m_id]
+        if state['pos_filtered'] is not None and not state['is_frozen']:
+            T = np.eye(4)
+            T[:3, :3] = state['rotation_matrix']
+            T[:3, 3] = state['pos_filtered']
+            self.origin_transform = T
+            logging.info("Origin successfully set.")
+            return True
+        logging.warning("Failed to set origin: Marker not visible.")
+        return False
 
     def start(self):
         """
         Starts the USB webcam pipeline and sets up approximate intrinsic calibration.
         """
         logging.info(f"Connecting to USB camera index {self.camera_index}...")
-        # Initialize VideoCapture with V4L2 backend for Linux performance
-        self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_V4L2)
+
+        backend = cv2.CAP_ANY
+        if sys.platform.startswith("linux"):
+            backend = getattr(cv2, "CAP_V4L2", cv2.CAP_ANY)
+        elif sys.platform.startswith("win"):
+            backend = getattr(cv2, "CAP_DSHOW", cv2.CAP_ANY)
+
+        self.cap = cv2.VideoCapture(self.camera_index, backend)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(self.camera_index)
         
         # Try to force 640x480 resolution for consistency and performance
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -75,18 +111,27 @@ class WebcamArucoTracker:
         if not self.cap.isOpened():
             raise Exception(f"Failed to open USB camera at index {self.camera_index}. Try changing camera_index!")
 
-        # Since we don't have RealSense hardware intrinsics, we approximate them based on a standard 640x480 webcam.
-        # This works perfectly fine for our teleoperation because any scaling error is absorbed by our POSITION_SCALING tuning factor in teleop_sim.py!
-        fx = 600.0
-        fy = 600.0
-        cx = 320.0
-        cy = 240.0
-        
-        self.camera_matrix = np.array([
-            [fx, 0, cx],
-            [0, fy, cy],
-            [0, 0, 1]
-        ], dtype=np.float64)
+        # Check if a custom calibration file exists
+        calib_file = os.path.join(os.path.dirname(__file__), "camera_calib.npz")
+        if os.path.exists(calib_file):
+            data = np.load(calib_file)
+            self.camera_matrix = data['mtx']
+            self.dist_coeffs = data['dist']
+            logging.info("Loaded custom camera calibration from camera_calib.npz")
+        else:
+            # Approximate them based on a standard 640x480 webcam.
+            fx = 600.0
+            fy = 600.0
+            cx = 320.0
+            cy = 240.0
+            
+            self.camera_matrix = np.array([
+                [fx, 0, cx],
+                [0, fy, cy],
+                [0, 0, 1]
+            ], dtype=np.float64)
+            self.dist_coeffs = np.zeros((5, 1))
+            logging.info("Using default approximate camera matrix.")
         
         logging.info(f"WebcamArucoTracker started successfully on camera {self.camera_index}.")
 
@@ -135,8 +180,18 @@ class WebcamArucoTracker:
                 )
                 
                 if success:
-                    pos_raw = tvec.flatten()
+                    pos_cam = tvec.flatten()
+                    rot_cam, _ = cv2.Rodrigues(rvec)
+                    
+                    # Transform to robot base frame
+                    pos_raw = self.R_cam2robot @ pos_cam
+                    rotation_matrix = self.R_cam2robot @ rot_cam
+                    
                     state = self.state[m_id]
+                    state['rotation_matrix'] = rotation_matrix
+                    
+                    # Compute Euler angles (Roll-Pitch-Yaw / XYZ) for Piper-X
+                    state['euler_angles'] = R_scipy.from_matrix(rotation_matrix).as_euler('xyz', degrees=False)
                     
                     if state['pos_filtered'] is None or state['is_frozen']:
                         # Reset filter on first detection or recovery from frozen state
@@ -178,9 +233,37 @@ class WebcamArucoTracker:
         for m_id in self.marker_ids:
             state = self.state[m_id]
             if state['pos_filtered'] is not None and not state['is_frozen']:
-                tracking_out[m_id] = state['pos_filtered'].copy()
+                if self.origin_transform is not None:
+                    T_curr = np.eye(4)
+                    T_curr[:3, :3] = state['rotation_matrix']
+                    T_curr[:3, 3] = state['pos_filtered']
+                    
+                    # Compute relative transform
+                    T_rel = np.linalg.inv(self.origin_transform) @ T_curr
+                    rel_pos = T_rel[:3, 3]
+                    rel_rot = T_rel[:3, :3]
+                    rel_euler = R_scipy.from_matrix(rel_rot).as_euler('xyz', degrees=False)
+                    
+                    pose_6d = np.concatenate([rel_pos, rel_euler])
+                else:
+                    # Absolute 6D vector: [x, y, z, rx, ry, rz]
+                    pose_6d = np.concatenate([state['pos_filtered'], state['euler_angles']])
+                    
+                tracking_out[m_id] = pose_6d
             else:
                 tracking_out[m_id] = None
+
+        # Store attributes for external access
+        self.rotation_matrices = {
+            m_id: self.state[m_id]['rotation_matrix'].copy()
+            if self.state[m_id]['rotation_matrix'] is not None else None
+            for m_id in self.marker_ids
+        }
+        self.euler_angles = {
+            m_id: self.state[m_id]['euler_angles'].copy()
+            if self.state[m_id]['euler_angles'] is not None else None
+            for m_id in self.marker_ids
+        }
                 
         # Optional: draw axes and markers for visual debugging
         if ids is not None:
@@ -201,8 +284,8 @@ if __name__ == "__main__":
     # Quick visual validation test
     logging.basicConfig(level=logging.INFO)
     
-    # Try index 4 which corresponds to the newly plugged in /dev/video4
-    tracker = WebcamArucoTracker(marker_length=0.015, camera_index=4)
+    # Default to the first available camera on Windows and the first USB webcam on Linux.
+    tracker = WebcamArucoTracker(marker_length=0.093, camera_index=1)
     tracker.start()
     
     try:
@@ -212,16 +295,23 @@ if __name__ == "__main__":
                 # Print positions to console
                 status = []
                 for m_id in tracker.marker_ids:
-                    pos = positions.get(m_id)
-                    if pos is not None:
-                        status.append(f"M{m_id}: [{pos[0]:.3f}, {pos[1]:.3f}, {pos[2]:.3f}]")
+                    pose_6d = positions.get(m_id)
+                    if pose_6d is not None:
+                        # Output exactly the 6D vector format [x, y, z, rx, ry, rz]
+                        status.append(f"[{pose_6d[0]:.3f}, {pose_6d[1]:.3f}, {pose_6d[2]:.3f}, {pose_6d[3]:.3f}, {pose_6d[4]:.3f}, {pose_6d[5]:.3f}]")
                     else:
                         status.append(f"M{m_id}: LOST")
                 print(" | ".join(status), end="\r")
                 
                 cv2.imshow("USB Webcam Aruco Tracking", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('o'):
+                    if tracker.set_origin():
+                        print("\n>>> ORIGIN SET! New output is relative to this pose. <<<\n")
+                    else:
+                        print("\n>>> Failed to set origin (marker not visible). <<<\n")
     except KeyboardInterrupt:
         pass
     finally:

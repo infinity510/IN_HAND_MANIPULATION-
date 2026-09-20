@@ -40,15 +40,19 @@ class TeleopSystem:
         self.clutch_active = False
         self.absolute_mode = False
         self.reset_requested = False
+        self.spawn_object_requested = None
         
         self.last_qpos = np.zeros(12)
         self.human_anchor = None
         self.init_robot_qpos = None
         
+        self.active_object = None  # None means no object is spawned
+        
         # Data Collection
         self.is_recording = False
-        self.episode_data = {'qpos': [], 'qvel': [], 'action': []}
+        self.episode_data = {'robot_qpos': [], 'robot_qvel': [], 'object_pos': [], 'object_quat': [], 'action': []}
         self.episode_counter = 1
+        self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])  # [w, x, y, z]
         
         # Ensure data dir exists
         os.makedirs("data", exist_ok=True)
@@ -68,7 +72,7 @@ class TeleopSystem:
             elif key.char == 'c':
                 if not self.is_recording:
                     self.is_recording = True
-                    logging.info("RECORDING STARTED")
+                    logging.info("RECORDING STARTED. Manipulate freely, final pose will be the goal.")
                 else:
                     if self.is_recording:
                         self.save_episode()
@@ -79,6 +83,8 @@ class TeleopSystem:
                 logging.info("Absolute Mode ENABLED")
             elif key.char == 'r':
                 self.reset_requested = True
+            elif key.char in ['1', '2', '3', '4', '5']:
+                self.spawn_object_requested = int(key.char)
         except AttributeError:
             pass
 
@@ -95,25 +101,33 @@ class TeleopSystem:
             pass
 
     def save_episode(self):
-        if len(self.episode_data['qpos']) < 10:
+        if len(self.episode_data['robot_qpos']) < 10:
             logging.warning("Episode too short, discarding.")
         else:
+            # Hindsight Labeling: The final orientation achieved is treated as the goal
+            final_quat = self.episode_data['object_quat'][-1]
+            
             filename = f"data/episode_{datetime.now().strftime('%Y%m%d_%H%M%S')}.hdf5"
             with h5py.File(filename, 'w') as f:
-                f.create_dataset('qpos', data=np.array(self.episode_data['qpos']))
-                f.create_dataset('qvel', data=np.array(self.episode_data['qvel']))
+                f.create_dataset('robot_qpos', data=np.array(self.episode_data['robot_qpos']))
+                f.create_dataset('robot_qvel', data=np.array(self.episode_data['robot_qvel']))
+                f.create_dataset('object_pos', data=np.array(self.episode_data['object_pos']))
+                f.create_dataset('object_quat', data=np.array(self.episode_data['object_quat'])) # MuJoCo format: [w, x, y, z]
                 f.create_dataset('action', data=np.array(self.episode_data['action']))
-            logging.info(f"Saved episode {self.episode_counter} to {filename} with {len(self.episode_data['qpos'])} steps.")
+                f.attrs['object_id'] = self.active_object if self.active_object is not None else 0
+                f.attrs['target_quat'] = final_quat
+                
+            logging.info(f"Saved episode {self.episode_counter} to {filename} with {len(self.episode_data['robot_qpos'])} steps. Goal Quat: {final_quat}")
             self.episode_counter += 1
             
-        self.episode_data = {'qpos': [], 'qvel': [], 'action': []}
+        self.episode_data = {'robot_qpos': [], 'robot_qvel': [], 'object_pos': [], 'object_quat': [], 'action': []}
 
     def reset_to_start(self):
         logging.info("Resetting robot to initial pinch tripod...")
         self.clutch_active = False
         self.human_anchor = None
         self.is_recording = False
-        self.episode_data = {'qpos': [], 'qvel': [], 'action': []}
+        self.episode_data = {'robot_qpos': [], 'robot_qvel': [], 'object_pos': [], 'object_quat': [], 'action': []}
         
         initial_pose = [
             ("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047),
@@ -136,13 +150,18 @@ class TeleopSystem:
             except ValueError:
                 pass
                 
-        # Set cube to perfect grasp position
-        try:
-            cube_idx = self.model.jnt_qposadr[self.model.joint("cube_joint").id]
-            self.data.qpos[cube_idx:cube_idx+7] = [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
-            self.data.qvel[:] = 0.0
-        except Exception as e:
-            pass
+        # Move all objects away (clear workspace)
+        self.active_object = None
+        for i in range(1, 6):
+            try:
+                idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
+                self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+                
+                # Reset velocities for the object
+                vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
+                self.data.qvel[vel_idx:vel_idx+6] = 0.0
+            except Exception as e:
+                pass
 
     def run(self):
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
@@ -160,6 +179,23 @@ class TeleopSystem:
                 if self.reset_requested:
                     self.reset_to_start()
                     self.reset_requested = False
+                    
+                if self.spawn_object_requested is not None:
+                    obj_id = self.spawn_object_requested
+                    self.spawn_object_requested = None
+                    self.active_object = obj_id
+                    logging.info(f"Spawning object {obj_id} into workspace...")
+                    for i in range(1, 6):
+                        try:
+                            idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
+                            vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
+                            if i == obj_id:
+                                self.data.qpos[idx:idx+7] = [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+                            else:
+                                self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
+                            self.data.qvel[vel_idx:vel_idx+6] = 0.0
+                        except Exception as e:
+                            pass
                     
                 target_qpos = None
                 
@@ -299,20 +335,38 @@ class TeleopSystem:
                 if self.is_recording:
                     current_time = time.time()
                     if not hasattr(self, 'last_record_time') or (current_time - self.last_record_time) >= 0.02:
-                        self.episode_data['qpos'].append(self.data.qpos.copy())
-                        self.episode_data['qvel'].append(self.data.qvel.copy())
+                        # Extract explicit features for Isaac Sim portability
+                        r_qpos = [self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names]
+                        r_qvel = [self.data.qvel[self.model.jnt_dofadr[self.model.joint(j).id]] for j in self.joint_names]
+                        
+                        obj_pos = [0.0, 0.0, 0.0]
+                        obj_quat = [1.0, 0.0, 0.0, 0.0]
+                        if self.active_object is not None:
+                            obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object}_joint").id]
+                            obj_pos = self.data.qpos[obj_idx:obj_idx+3].copy()
+                            obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
+                            
+                        self.episode_data['robot_qpos'].append(r_qpos)
+                        self.episode_data['robot_qvel'].append(r_qvel)
+                        self.episode_data['object_pos'].append(obj_pos)
+                        self.episode_data['object_quat'].append(obj_quat)
                         self.episode_data['action'].append(self.data.ctrl.copy())
                         self.last_record_time = current_time
                     
-                # Extract Cube Pose for Display
+                # Extract Active Object Pose for Display
                 try:
-                    cube_idx = self.model.jnt_qposadr[self.model.joint("cube_joint").id]
-                    quat = self.data.qpos[cube_idx+3:cube_idx+7]
-                    euler = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz', degrees=True)
-                    contact_msg = "TOUCHING" if self.data.ncon > 0 else "NO CONTACT"
-                    overlay_text = f"Cube Roll/Pitch/Yaw:\n{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}\nStatus: {contact_msg}"
+                    if self.active_object is not None:
+                        obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object}_joint").id]
+                        quat = self.data.qpos[obj_idx+3:obj_idx+7]
+                        euler = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz', degrees=True)
+                        contact_msg = "TOUCHING" if self.data.ncon > 0 else "NO CONTACT"
+                        obj_names = {1: 'Cylinder', 2: 'Capsule (Cone)', 3: 'Cube', 4: 'Cuboid', 5: 'Sphere'}
+                        obj_name = obj_names.get(self.active_object, 'Unknown')
+                        overlay_text = f"{obj_name} Roll/Pitch/Yaw:\n{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}\nStatus: {contact_msg}"
+                    else:
+                        overlay_text = "No Object Spawned\nPress 1-5 to spawn\nStatus: WAITING"
                 except Exception as e:
-                    overlay_text = f"Cube Error:\n{e}\n"
+                    overlay_text = f"Object Error:\n{e}\n"
                     
                 # Highlight contacts in RED
                 viewer.user_scn.ngeom = 0

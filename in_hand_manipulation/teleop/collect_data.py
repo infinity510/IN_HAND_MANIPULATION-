@@ -45,6 +45,7 @@ class TeleopSystem:
         self.episode_data = {'robot_qpos': [], 'robot_qvel': [], 'object_pos': [], 'object_quat': [], 'action': []}
         self.episode_counter = 1
         self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])  # [w, x, y, z]
+        self.last_saved_filename = None
         
         # Ensure data dir exists
         os.makedirs("data", exist_ok=True)
@@ -75,6 +76,13 @@ class TeleopSystem:
                 logging.info("Absolute Mode ENABLED")
             elif key.char == 'r':
                 self.reset_requested = True
+            elif key.char == 'd':
+                if self.last_saved_filename and os.path.exists(self.last_saved_filename):
+                    os.remove(self.last_saved_filename)
+                    logging.info(f"DELETED last recording: {self.last_saved_filename}")
+                    self.last_saved_filename = None
+                else:
+                    logging.warning("No recent recording found to delete.")
             elif key.char in ['1', '2', '3', '4', '5']:
                 self.spawn_object_requested = int(key.char)
         except AttributeError:
@@ -110,6 +118,7 @@ class TeleopSystem:
                 f.attrs['target_quat'] = final_quat
                 
             logging.info(f"Saved episode {self.episode_counter} to {filename} with {len(self.episode_data['robot_qpos'])} steps. Goal Quat: {final_quat}")
+            self.last_saved_filename = filename
             self.episode_counter += 1
             
         self.episode_data = {'robot_qpos': [], 'robot_qvel': [], 'object_pos': [], 'object_quat': [], 'action': []}
@@ -386,15 +395,16 @@ class TeleopSystem:
                     cv2.waitKey(1)
                     
                 # Step physics forward to match webcam frame rate (approx 30Hz)
-                # 0.033s / 0.002s timestep ~= 16 steps. We use 25 for a slight speedup
-                for _ in range(25):
+                for _ in range(16):
                     mujoco.mj_step(self.model, self.data)
                     
                 viewer.sync()
                 
-                time_until_next_step = self.model.opt.timestep - (time.time() - step_start)
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
+                # Target loop time for 30 FPS is ~0.033 seconds
+                elapsed = time.time() - step_start
+                time_until_next = 0.033 - elapsed
+                if time_until_next > 0:
+                    time.sleep(time_until_next)
 
 if __name__ == "__main__":
     system = TeleopSystem()

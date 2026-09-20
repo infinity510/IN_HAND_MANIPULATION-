@@ -80,9 +80,14 @@ class WebcamArucoTracker:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         
-        # FIX LATENCY: Reduce buffer size to 1 so we always get the freshest frame, not a queued old one
+        # FIX LATENCY: Use MJPG codec to prevent USB bandwidth bottlenecks and enforce 60fps
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
         self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self.cap.set(cv2.CAP_PROP_FPS, 60)
+        
+        # Turn off auto-exposure and auto-focus which can drastically drop framerate in low light
+        self.cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1) # 1 = Manual for some cameras (V4L2 uses 1 for manual, 3 for auto)
+        self.cap.set(cv2.CAP_PROP_AUTOFOCUS, 0)
         
         # Give camera a moment to warm up
         time.sleep(1.0)
@@ -155,9 +160,10 @@ class WebcamArucoTracker:
 
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
         
-        # Detect ArUco markers
-        detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-        corners, ids, rejected = detector.detectMarkers(gray)
+        if not hasattr(self, 'detector'):
+            self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+            
+        corners, ids, rejected = self.detector.detectMarkers(gray)
 
         detected_ids = set()
         current_time = time.time()

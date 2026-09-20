@@ -112,6 +112,7 @@ python collect_data.py
 # 'r' = Reset hand and clear workspace
 # '1'-'5' = Spawn specific object shape
 # 'c' = Start/Stop recording (Hindsight goal labeling applies on stop)
+# 'd' = Delete the latest saved recording
 # SPACE = Clutch (engage/disengage human anchor)
 # 'o' = Absolute mode toggle
 ```

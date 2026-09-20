@@ -4,6 +4,7 @@ import time
 import logging
 import sys
 import os
+import threading
 class WebcamArucoTracker:
     """
     ArUco-based 3D marker tracking using a standard USB Webcam.
@@ -53,6 +54,11 @@ class WebcamArucoTracker:
         self.cap = None
         self.camera_matrix = None
         self.dist_coeffs = np.zeros((4, 1))
+        
+        self._thread = None
+        self._running = False
+        self._latest_frame = None
+        self._lock = threading.Lock()
 
     def start(self):
         """
@@ -106,12 +112,30 @@ class WebcamArucoTracker:
             self.dist_coeffs = np.zeros((4, 1))
             logging.info("Using default approximate camera matrix.")
         
+        self._running = True
+        self._thread = threading.Thread(target=self._update_frame, daemon=True)
+        self._thread.start()
+        
         logging.info(f"WebcamArucoTracker started successfully on camera {self.camera_index}.")
+
+    def _update_frame(self):
+        while self._running:
+            if self.cap is not None and self.cap.isOpened():
+                ret, frame = self.cap.read()
+                if ret:
+                    with self._lock:
+                        self._latest_frame = frame.copy()
+            else:
+                time.sleep(0.01)
 
     def stop(self):
         """
         Stops the USB webcam pipeline.
         """
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+            
         if self.cap is not None:
             self.cap.release()
         logging.info("WebcamArucoTracker stopped.")
@@ -121,13 +145,13 @@ class WebcamArucoTracker:
         Fetches the next frame from webcam, detects markers, applies EMA + missing frame logic,
         and returns the estimated 3D Cartesian positions.
         """
-        if self.cap is None or not self.cap.isOpened():
+        if not self._running:
             return None, None
 
-        ret, color_image = self.cap.read()
-        if not ret:
-            logging.warning("Failed to grab frame from USB camera!")
-            return None, None
+        with self._lock:
+            if self._latest_frame is None:
+                return None, None
+            color_image = self._latest_frame.copy()
 
         gray = cv2.cvtColor(color_image, cv2.COLOR_BGR2GRAY)
         

@@ -65,6 +65,21 @@ class WebcamArucoTracker:
         self.dist_coeffs = np.zeros((4, 1))
         self.rotation_matrices = {m_id: None for m_id in self.marker_ids}
         self.euler_angles = {m_id: None for m_id in self.marker_ids}
+        self.origin_transform = None
+
+    def set_origin(self):
+        """Sets the current pose of the primary marker as the global origin."""
+        m_id = self.marker_ids[0]
+        state = self.state[m_id]
+        if state['pos_filtered'] is not None and not state['is_frozen']:
+            T = np.eye(4)
+            T[:3, :3] = state['rotation_matrix']
+            T[:3, 3] = state['pos_filtered']
+            self.origin_transform = T
+            logging.info("Origin successfully set.")
+            return True
+        logging.warning("Failed to set origin: Marker not visible.")
+        return False
 
     def start(self):
         """
@@ -218,8 +233,22 @@ class WebcamArucoTracker:
         for m_id in self.marker_ids:
             state = self.state[m_id]
             if state['pos_filtered'] is not None and not state['is_frozen']:
-                # 6D vector: [x, y, z, rx, ry, rz]
-                pose_6d = np.concatenate([state['pos_filtered'], state['euler_angles']])
+                if self.origin_transform is not None:
+                    T_curr = np.eye(4)
+                    T_curr[:3, :3] = state['rotation_matrix']
+                    T_curr[:3, 3] = state['pos_filtered']
+                    
+                    # Compute relative transform
+                    T_rel = np.linalg.inv(self.origin_transform) @ T_curr
+                    rel_pos = T_rel[:3, 3]
+                    rel_rot = T_rel[:3, :3]
+                    rel_euler = R_scipy.from_matrix(rel_rot).as_euler('xyz', degrees=False)
+                    
+                    pose_6d = np.concatenate([rel_pos, rel_euler])
+                else:
+                    # Absolute 6D vector: [x, y, z, rx, ry, rz]
+                    pose_6d = np.concatenate([state['pos_filtered'], state['euler_angles']])
+                    
                 tracking_out[m_id] = pose_6d
             else:
                 tracking_out[m_id] = None
@@ -268,14 +297,21 @@ if __name__ == "__main__":
                 for m_id in tracker.marker_ids:
                     pose_6d = positions.get(m_id)
                     if pose_6d is not None:
-                        status.append(f"M{m_id}: P[{pose_6d[0]:.3f}, {pose_6d[1]:.3f}, {pose_6d[2]:.3f}] E[{pose_6d[3]:.2f}, {pose_6d[4]:.2f}, {pose_6d[5]:.2f}]")
+                        # Output exactly the 6D vector format [x, y, z, rx, ry, rz]
+                        status.append(f"[{pose_6d[0]:.3f}, {pose_6d[1]:.3f}, {pose_6d[2]:.3f}, {pose_6d[3]:.3f}, {pose_6d[4]:.3f}, {pose_6d[5]:.3f}]")
                     else:
                         status.append(f"M{m_id}: LOST")
                 print(" | ".join(status), end="\r")
                 
                 cv2.imshow("USB Webcam Aruco Tracking", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
                     break
+                elif key == ord('o'):
+                    if tracker.set_origin():
+                        print("\n>>> ORIGIN SET! New output is relative to this pose. <<<\n")
+                    else:
+                        print("\n>>> Failed to set origin (marker not visible). <<<\n")
     except KeyboardInterrupt:
         pass
     finally:

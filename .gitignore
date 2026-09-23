@@ -430,4 +430,4 @@ FodyWeavers.xsd
 __pycache__/
 *.pyc
 .vscode/
-data/
+

@@ -101,10 +101,10 @@ The recorded `data/<object_name>_<index>.hdf5` files are heavily decoupled from 
 ## 6. Training Pipeline (Isaac Sim)
 
 The ultimate goal is to train a policy network in NVIDIA Isaac Sim.
-1. **Behavioral Cloning (IL):** Write a PyTorch Dataloader to read the HDF5 files. Train a network to predict `action` given `(robot_qpos, robot_qvel, object_pos, object_quat, target_quat)`.
-1. **Behavioral Cloning (IL):** Write a PyTorch Dataloader to read the HDF5 files. Train a network to predict `action` given `(robot_qpos, robot_qvel, object_pos, object_quat, target_quat, object_id_one_hot)`. 
+1. **Data Preprocessing:** Before training, run `preprocess_data.py` to trim out static "dead time" at the beginning and end of recordings, ensuring the network doesn't learn to just stand still. This saves cleaned data to `data_processed/`.
+2. **Behavioral Cloning (IL):** Write a PyTorch Dataloader to read the HDF5 files. Train a network to predict `action` given `(robot_qpos, robot_qvel, object_pos, object_quat, target_quat, object_id_one_hot)`. 
 *(Note: `object_id_one_hot` is a 5-dimensional one-hot encoded vector representing the `object_id` from the episode metadata, ensuring the policy generalizes across different shapes.)*
-2. **RL Fine-Tuning:** Deploy the pre-trained BC policy into an Isaac Sim Articulation environment. Use Reinforcement Learning (e.g., PPO via OmniIsaacGymEnvs) to fine-tune the policy to achieve the `target_quat` robustly, rewarding minimal distance to the goal orientation.
+3. **RL Fine-Tuning:** Deploy the pre-trained BC policy into an Isaac Sim Articulation environment. Use Reinforcement Learning (e.g., PPO via OmniIsaacGymEnvs) to fine-tune the policy to achieve the `target_quat` robustly, rewarding minimal distance to the goal orientation.
 
 ---
 
@@ -131,6 +131,13 @@ python replay_data.py
 # Controls:
 # SPACE = Pause / Play
 # Left / Right Arrows = Skip to prev/next recording
+```
+
+### Data Preprocessing (For Isaac Sim)
+```bash
+cd in_hand_manipulation/teleop
+python preprocess_data.py
+# Reads from ../../data/ and outputs trimmed episodes to ../../data_processed/
 ```
 
 ### Sandbox Teleoperation (No Data Saved)

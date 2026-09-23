@@ -82,7 +82,7 @@ class TeleopSystem:
                     self.last_saved_filename = None
                 else:
                     logging.warning("No recent recording found to delete.")
-            elif key.char in ['1', '2', '3', '4', '5']:
+            elif key.char in ['1', '2', '3']:
                 self.spawn_object_requested = int(key.char)
         except AttributeError:
             pass
@@ -106,15 +106,22 @@ class TeleopSystem:
             # Hindsight Labeling: The final orientation achieved is treated as the goal
             final_quat = self.episode_data['object_quat'][-1]
             
-            obj_names_map = {1: 'cylinder', 2: 'capsule', 3: 'cube', 4: 'cuboid', 5: 'sphere'}
+            obj_names_map = {1: 'cylinder', 2: 'cube', 3: 'cuboid'}
             obj_name = obj_names_map.get(self.active_object, 'unknown')
+            import glob
+            existing_files = glob.glob(f"data/{obj_name}_*.hdf5")
+            max_idx = 0
+            for f in existing_files:
+                try:
+                    # extract the number from strings like 'data/cube_12.hdf5'
+                    idx = int(os.path.basename(f).replace(f"{obj_name}_", "").replace(".hdf5", ""))
+                    if idx > max_idx:
+                        max_idx = idx
+                except ValueError:
+                    pass
             
-            while True:
-                filename = f"data/{obj_name}_{self.episode_counter}.hdf5"
-                if not os.path.exists(filename):
-                    break
-                self.episode_counter += 1
-                
+            self.episode_counter = max_idx + 1
+            filename = f"data/{obj_name}_{self.episode_counter}.hdf5"
             with h5py.File(filename, 'w') as f:
                 f.create_dataset('robot_qpos', data=np.array(self.episode_data['robot_qpos']))
                 f.create_dataset('robot_qvel', data=np.array(self.episode_data['robot_qvel']))
@@ -160,7 +167,7 @@ class TeleopSystem:
                 
         # Move all objects away (clear workspace)
         self.active_object = None
-        for i in range(1, 6):
+        for i in range(1, 4):
             try:
                 idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
                 self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
@@ -193,7 +200,7 @@ class TeleopSystem:
                     self.spawn_object_requested = None
                     self.active_object = obj_id
                     logging.info(f"Spawning object {obj_id} into workspace...")
-                    for i in range(1, 6):
+                    for i in range(1, 4):
                         try:
                             idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
                             vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
@@ -243,10 +250,13 @@ class TeleopSystem:
                             for i in range(3):
                                 aligned[i, :2] = R_2d @ centered[i, :2]
                                 
+                            finger_centroid = np.mean(human_pos, axis=0)
+                            finger_centered = human_pos - finger_centroid
+                            
                             curls = []
                             for i in range(3):
-                                pt = aligned[i, :2]
-                                r = np.linalg.norm(pt)
+                                # Fix: Use distance between fingers to detect pinching, not distance to wrist!
+                                r = np.linalg.norm(finger_centered[i, :2])
                                 curl_i = 1.7 - (r - 0.02) * 25.0
                                 curl_i = np.clip(curl_i, -0.2, 2.0)
                                 curls.append(curl_i)
@@ -286,11 +296,15 @@ class TeleopSystem:
                             for i in range(3):
                                 aligned[i, :2] = R_2d @ centered[i, :2]
                                 
+                            finger_centroid = np.mean(human_pos, axis=0)
+                            finger_centered = human_pos - finger_centroid
+                            
                             finger_angles = []
                             finger_spreads = []
                             for i in range(3):
                                 pt = aligned[i, :2]
-                                finger_spreads.append(np.linalg.norm(pt))
+                                # Fix: Measure distance between the fingers themselves to detect a pinch!
+                                finger_spreads.append(np.linalg.norm(finger_centered[i, :2]))
                                 finger_angles.append(np.arctan2(pt[1], pt[0]))
                                 
                             if self.human_anchor is None:
@@ -332,8 +346,15 @@ class TeleopSystem:
                                     except: pass
                 
                 if target_qpos is not None:
-                    delta_q = target_qpos - self.last_qpos
-                    target_qpos = self.last_qpos + np.clip(delta_q, -0.5, 0.5)
+                    # JOINT-LEVEL REFINEMENT 1: EMA Smoothing
+                    # This absorbs the rotational jitter when your fingers are close together.
+                    alpha_q = 0.5
+                    smoothed_qpos = self.last_qpos * (1 - alpha_q) + target_qpos * alpha_q
+                    
+                    # JOINT-LEVEL REFINEMENT 2: Speed Limiting (Clipping)
+                    # Reduced from 0.5 to 0.15 to prevent fingers from phasing through the cube during fast movements
+                    delta_q = smoothed_qpos - self.last_qpos
+                    target_qpos = self.last_qpos + np.clip(delta_q, -0.15, 0.15)
                     self.last_qpos = target_qpos
                     
                     for i, name in enumerate(self.joint_names):
@@ -372,11 +393,13 @@ class TeleopSystem:
                         quat = self.data.qpos[obj_idx+3:obj_idx+7]
                         euler = R.from_quat([quat[1], quat[2], quat[3], quat[0]]).as_euler('xyz', degrees=True)
                         contact_msg = "TOUCHING" if self.data.ncon > 0 else "NO CONTACT"
-                        obj_names = {1: 'Cylinder', 2: 'Capsule (Cone)', 3: 'Cube', 4: 'Cuboid', 5: 'Sphere'}
+                        obj_names = {1: 'Cylinder', 2: 'Cube', 3: 'Cuboid'}
                         obj_name = obj_names.get(self.active_object, 'Unknown')
-                        overlay_text = f"{obj_name} Roll/Pitch/Yaw:\n{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}\nStatus: {contact_msg}"
+                        # Extract the pinch radius from the loop above if available, else 0
+                        r_val = r if 'r' in locals() else 0.0
+                        overlay_text = f"Pinch (r): {r_val:.3f}m\n{euler[0]:.1f}, {euler[1]:.1f}, {euler[2]:.1f}\nStatus: {contact_msg}"
                     else:
-                        overlay_text = "No Object Spawned\nPress 1-5 to spawn\nStatus: WAITING"
+                        overlay_text = "No Object Spawned\nPress 1-3 to spawn\nStatus: WAITING"
                 except Exception as e:
                     overlay_text = f"Object Error:\n{e}\n"
                     

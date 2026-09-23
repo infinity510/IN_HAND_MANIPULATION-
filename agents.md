@@ -52,7 +52,11 @@ The teleoperation system uses a standard 640x480 USB Webcam running at 60fps.
     * `ID 2`: Middle tip
     * `ID 3`: Wrist / Palm (Used as the absolute origin to perfectly decouple finger movements).
 * **Tracking (`webcam_aruco_tracker.py`):** Uses a background daemon thread (`_update_frame`) with a `threading.Lock` to continuously fetch the absolute latest frame from the webcam. This bypasses OpenCV's internal queue buffer, ensuring **zero-latency** state updates for the physics simulation.
-* **Mapping:** The 2D/3D positions of the markers on the human fingers are retargeted to the joint angles of the simulated Tesollo hand.
+* **Mapping and Calibration:**
+    * The first time all 4 markers are detected (or when pressing `p`), the system captures a **relaxed grip** reference pose.
+    * **Virtual Centroid (Curl):** The center of the 3 fingers relative to the wrist is fixed. Distance from this fixed centroid drives the curling joints (`m3`, `m4`), completely decoupling finger extension from global hand motion.
+    * **Wrist Angle (Sway):** The side-to-side spread of each finger is calculated as the angle relative to the wrist marker (which is stable since the wrist is ~10cm away). This drives the base sway joint (`m2`).
+    * **Clutch Mode:** (Hold Spacebar) Anchors the hand rotation, allowing twisting of the object using the base tripod joints (`m1`).
 
 ---
 
@@ -61,12 +65,10 @@ The teleoperation system uses a standard 640x480 USB Webcam running at 60fps.
 The script `collect_data.py` is the heart of the project. It connects the webcam tracker to the MuJoCo physics engine and records HDF5 datasets explicitly formatted for downstream training in Isaac Sim.
 
 ### 4.1. Supported Objects
-All objects have a mass of **0.5 kg**.
+All objects have a mass of **1.0 kg** (defined in `scene_cube.xml`).
 * `1`: Cylinder
-* `2`: Capsule (Substitute for Cone)
-* `3`: Small Cube
-* `4`: Cuboid (Standard size)
-* `5`: Sphere
+* `2`: Cube
+* `3`: Cuboid
 
 ### 4.2. Workflow
 1. **Reset (`r`):** Resets the gripper to a tripod pinch and sweeps all objects out of the workspace.
@@ -79,7 +81,7 @@ All objects have a mass of **0.5 kg**.
 
 ## 5. Dataset Structure (HDF5)
 
-The recorded `episode_YYYYMMDD_HHMMSS.hdf5` files are heavily decoupled from MuJoCo to ensure seamless **Sim-to-Sim transfer to Isaac Sim (PhysX)**.
+The recorded `data/<object_name>_<index>.hdf5` files are heavily decoupled from MuJoCo to ensure seamless **Sim-to-Sim transfer to Isaac Sim (PhysX)**.
 
 **Time-Series Datasets (Arrays of length T):**
 * `robot_qpos` `(T, 12)`: Angular positions of the 12 gripper joints.
@@ -114,11 +116,21 @@ cd in_hand_manipulation/teleop
 python collect_data.py
 # Controls: 
 # 'r' = Reset hand and clear workspace
-# '1'-'5' = Spawn specific object shape
+# '1'-'3' = Spawn specific object shape (Cylinder, Cube, Cuboid)
 # 'c' = Start/Stop recording (Hindsight goal labeling applies on stop)
 # 'd' = Delete the latest saved recording
-# SPACE = Clutch (engage/disengage human anchor)
+# 'p' = Recalibrate relaxed finger mapping
+# SPACE = Clutch (engage/disengage human anchor for twisting)
 # 'o' = Absolute mode toggle
+```
+
+### Replay Data
+```bash
+cd in_hand_manipulation/teleop
+python replay_data.py
+# Controls:
+# SPACE = Pause / Play
+# Left / Right Arrows = Skip to prev/next recording
 ```
 
 ### Sandbox Teleoperation (No Data Saved)

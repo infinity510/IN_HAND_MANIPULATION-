@@ -233,33 +233,32 @@ class TeleopSystem:
                         valid_tracking = False
                     
                     if valid_tracking:
+                        human_pos = np.array(human_pos)
+                        centroid = wrist_pos
+                        centered = human_pos - centroid
+                        
+                        p0 = centered[0, :2]
+                        p1 = centered[1, :2]
+                        p2 = centered[2, :2]
+                        v_human = p0 - (p1 + p2) / 2.0
+                        v_len = np.linalg.norm(v_human) + 1e-6
+                        v_human /= v_len
+                        theta_hand = np.arctan2(v_human[1], v_human[0])
+                        
+                        c, s = np.cos(-theta_hand), np.sin(-theta_hand)
+                        R_2d = np.array([[c, -s], [s, c]])
+                        
+                        aligned = np.zeros_like(centered)
+                        for i in range(3):
+                            aligned[i, :2] = R_2d @ centered[i, :2]
+                            
+                        if self.local_centroid is None:
+                            self.local_centroid = np.mean(aligned, axis=0)
+                            vecs_curl = aligned[:, :2] - self.local_centroid[:2]
+                            self.calibrated_pinch_distances = [np.linalg.norm(v) for v in vecs_curl]
+                            self.calibrated_pinch_angles = [np.arctan2(aligned[i, 1], aligned[i, 0]) for i in range(3)]
+                            
                         if self.absolute_mode:
-                            human_pos = np.array(human_pos)
-                            centroid = wrist_pos
-                            centered = human_pos - centroid
-                            
-                            p0 = centered[0, :2]
-                            p1 = centered[1, :2]
-                            p2 = centered[2, :2]
-                            v_human = p0 - (p1 + p2) / 2.0
-                            v_len = np.linalg.norm(v_human) + 1e-6
-                            v_human /= v_len
-                            theta_hand = np.arctan2(v_human[1], v_human[0])
-                            
-                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
-                            R_2d = np.array([[c, -s], [s, c]])
-                            
-                            aligned = np.zeros_like(centered)
-                            for i in range(3):
-                                aligned[i, :2] = R_2d @ centered[i, :2]
-                                
-                            if self.local_centroid is None:
-                                self.local_centroid = np.mean(aligned, axis=0)
-                                vecs_curl = aligned[:, :2] - self.local_centroid[:2]
-                                self.calibrated_pinch_distances = [np.linalg.norm(v) for v in vecs_curl]
-                                self.calibrated_pinch_angles = [np.arctan2(aligned[i, 1], aligned[i, 0]) for i in range(3)]
-                                
-                            if self.absolute_mode:
                                 curls = []
                                 sways = []
                                 for i in range(3):

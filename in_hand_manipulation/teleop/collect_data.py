@@ -326,13 +326,14 @@ class TeleopSystem:
                                     target_qpos[idx] = np.clip(tripod_bases[i] + twist_delta, -1.9, 2.0)
                                 except: pass
                                 
+                            sway_scales = [0.5, 3.5, 3.5]  # Thumb (f1) scaled down, Index/Middle (f2,f3) scaled up
                             for i, f_idx in enumerate([1, 2, 3]):
                                 angle_delta = finger_angles[i] - self.init_finger_angles[i]
                                 angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
                                 
                                 try:
                                     idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
+                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * sway_scales[i], -0.6, 0.6)
                                 except: pass
                                 
                                 r = finger_spreads[i]

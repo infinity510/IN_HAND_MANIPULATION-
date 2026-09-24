@@ -36,9 +36,6 @@ class TeleopSystem:
         self.last_qpos = np.zeros(12)
         self.human_anchor = None
         self.init_robot_qpos = None
-        self.calibrated_pinch_distances = None
-        self.calibrated_pinch_angles = None
-        self.local_centroid = None
         
         self.active_object = None  # None means no object is spawned
         
@@ -233,120 +230,129 @@ class TeleopSystem:
                         valid_tracking = False
                     
                     if valid_tracking:
-                        human_pos = np.array(human_pos)
-                        centroid = wrist_pos
-                        centered = human_pos - centroid
-                        
-                        p0 = centered[0, :2]
-                        p1 = centered[1, :2]
-                        p2 = centered[2, :2]
-                        v_human = p0 - (p1 + p2) / 2.0
-                        v_len = np.linalg.norm(v_human) + 1e-6
-                        v_human /= v_len
-                        theta_hand = np.arctan2(v_human[1], v_human[0])
-                        
-                        c, s = np.cos(-theta_hand), np.sin(-theta_hand)
-                        R_2d = np.array([[c, -s], [s, c]])
-                        
-                        aligned = np.zeros_like(centered)
-                        for i in range(3):
-                            aligned[i, :2] = R_2d @ centered[i, :2]
-                            
-                        if self.local_centroid is None:
-                            self.local_centroid = np.mean(aligned, axis=0)
-                            vecs_curl = aligned[:, :2] - self.local_centroid[:2]
-                            self.calibrated_pinch_distances = [np.linalg.norm(v) for v in vecs_curl]
-                            self.calibrated_pinch_angles = [np.arctan2(aligned[i, 1], aligned[i, 0]) for i in range(3)]
-                            
                         if self.absolute_mode:
-                                curls = []
-                                sways = []
-                                for i in range(3):
-                                    vec_for_curl = aligned[i, :2] - self.local_centroid[:2]
-                                    r = np.linalg.norm(vec_for_curl)
-                                    
-                                    angle = np.arctan2(aligned[i, 1], aligned[i, 0])
-                                    
-                                    curl_i = 0.8 - (r - self.calibrated_pinch_distances[i]) * 25.0
-                                    curl_i = np.clip(curl_i, -0.2, 2.0)
-                                    curls.append(curl_i)
-                                    
-                                    delta_angle = angle - self.calibrated_pinch_angles[i]
-                                    delta_angle = (delta_angle + np.pi) % (2 * np.pi) - np.pi
-                                    sway_i = np.clip(delta_angle * 1.5, -0.6, 0.6)
-                                    sways.append(sway_i)
-                                    
-                                direct_qpos = self.last_qpos.copy()
-                                for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
-                                    try:
-                                        idx = self.joint_names.index(j_name)
-                                        direct_qpos[idx] = base_val
-                                    except: pass
-                                    
-                                for i, f_idx in enumerate([1, 2, 3]):
-                                    try:
-                                        idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                        direct_qpos[idx] = sways[i]
-                                    except: pass
-                                    for m_idx in [3, 4]:
-                                        try:
-                                            idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
-                                            direct_qpos[idx] = curls[i]
-                                        except: pass
-                                        
-                                target_qpos = direct_qpos
+                            human_pos = np.array(human_pos)
+                            centroid = wrist_pos
+                            centered = human_pos - centroid
+                            
+                            p0 = centered[0, :2]
+                            p1 = centered[1, :2]
+                            p2 = centered[2, :2]
+                            v_human = p0 - (p1 + p2) / 2.0
+                            v_len = np.linalg.norm(v_human) + 1e-6
+                            v_human /= v_len
+                            theta_hand = np.arctan2(v_human[1], v_human[0])
+                            
+                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
+                            R_2d = np.array([[c, -s], [s, c]])
+                            
+                            aligned = np.zeros_like(centered)
+                            for i in range(3):
+                                aligned[i, :2] = R_2d @ centered[i, :2]
                                 
-                            elif self.clutch_active:
-                                finger_angles = []
-                                finger_spreads = []
-                                for i in range(3):
-                                    vec_for_curl = aligned[i, :2] - self.local_centroid[:2]
-                                    finger_spreads.append(np.linalg.norm(vec_for_curl))
-                                    finger_angles.append(np.arctan2(aligned[i, 1], aligned[i, 0]))
-                                    
-                                if self.human_anchor is None:
-                                    self.human_anchor = True
-                                    self.init_theta = theta_hand
-                                    self.init_robot_qpos = self.last_qpos.copy()
-                                    
-                                target_qpos = self.init_robot_qpos.copy()
+                            finger_centroid = np.mean(human_pos, axis=0)
+                            finger_centered = human_pos - finger_centroid
+                            
+                            curls = []
+                            for i in range(3):
+                                # Fix: Use distance between fingers to detect pinching, not distance to wrist!
+                                r = np.linalg.norm(finger_centered[i, :2])
+                                curl_i = 1.7 - (r - 0.02) * 25.0
+                                curl_i = np.clip(curl_i, -0.2, 2.0)
+                                curls.append(curl_i)
                                 
-                                twist_delta = theta_hand - self.init_theta
-                                twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
-                                twist_delta *= 1.2
+                            direct_qpos = self.last_qpos.copy()
+                            for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
+                                try:
+                                    idx = self.joint_names.index(j_name)
+                                    direct_qpos[idx] = base_val
+                                except: pass
                                 
-                                tripod_bases = [0.0, -1.047, 1.047]
-                                for i, j_name in enumerate(["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]):
+                            for i, f_idx in enumerate([1, 2, 3]):
+                                try:
+                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                    direct_qpos[idx] = 0.0
+                                except: pass
+                                for m_idx in [3, 4]:
                                     try:
-                                        idx = self.joint_names.index(j_name)
-                                        target_qpos[idx] = np.clip(tripod_bases[i] + twist_delta, -1.9, 2.0)
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                        direct_qpos[idx] = curls[i]
                                     except: pass
                                     
-                                for i, f_idx in enumerate([1, 2, 3]):
-                                    angle_delta = finger_angles[i] - self.calibrated_pinch_angles[i]
-                                    angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
-                                    
+                            target_qpos = direct_qpos
+
+                        elif self.clutch_active:
+                            human_pos = np.array(human_pos)
+                            current_centroid = wrist_pos
+                            centered = human_pos - current_centroid
+                            
+                            p0, p1, p2 = centered[0, :2], centered[1, :2], centered[2, :2]
+                            v_human = p0 - (p1 + p2) / 2.0
+                            theta_hand = np.arctan2(v_human[1], v_human[0])
+                            
+                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
+                            R_2d = np.array([[c, -s], [s, c]])
+                            aligned = np.zeros_like(centered)
+                            for i in range(3):
+                                aligned[i, :2] = R_2d @ centered[i, :2]
+                                
+                            finger_centroid = np.mean(human_pos, axis=0)
+                            finger_centered = human_pos - finger_centroid
+                            
+                            finger_angles = []
+                            finger_spreads = []
+                            for i in range(3):
+                                pt = aligned[i, :2]
+                                # Fix: Measure distance between the fingers themselves to detect a pinch!
+                                finger_spreads.append(np.linalg.norm(finger_centered[i, :2]))
+                                finger_angles.append(np.arctan2(pt[1], pt[0]))
+                                
+                            if self.human_anchor is None:
+                                self.human_anchor = True
+                                self.init_theta = theta_hand
+                                self.init_finger_angles = finger_angles
+                                self.init_robot_qpos = self.last_qpos.copy()
+                                
+                            target_qpos = self.init_robot_qpos.copy()
+                            
+                            twist_delta = theta_hand - self.init_theta
+                            twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
+                            twist_delta *= 1.2
+                            
+                            tripod_bases = [0.0, -1.047, 1.047]
+                            for i, j_name in enumerate(["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]):
+                                try:
+                                    idx = self.joint_names.index(j_name)
+                                    target_qpos[idx] = np.clip(tripod_bases[i] + twist_delta, -1.9, 2.0)
+                                except: pass
+                                
+                            for i, f_idx in enumerate([1, 2, 3]):
+                                angle_delta = finger_angles[i] - self.init_finger_angles[i]
+                                angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
+                                
+                                try:
+                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
+                                except: pass
+                                
+                                r = finger_spreads[i]
+                                curl_i = 1.7 - (r - 0.02) * 25.0
+                                curl_i = np.clip(curl_i, -0.2, 2.2)
+                                
+                                for m_idx in [3, 4]:
                                     try:
-                                        idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                        target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                        target_qpos[idx] = curl_i
                                     except: pass
-                                    
-                                    r = finger_spreads[i]
-                                    curl_i = 0.8 - (r - self.calibrated_pinch_distances[i]) * 25.0
-                                    curl_i = np.clip(curl_i, -0.2, 2.2)
-                                    
-                                    for m_idx in [3, 4]:
-                                        try:
-                                            idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
-                                            target_qpos[idx] = curl_i
-                                        except: pass
                 
                 if target_qpos is not None:
                     # JOINT-LEVEL REFINEMENT 1: EMA Smoothing
+                    # This absorbs the rotational jitter when your fingers are close together.
                     alpha_q = 0.5
                     smoothed_qpos = self.last_qpos * (1 - alpha_q) + target_qpos * alpha_q
                     
                     # JOINT-LEVEL REFINEMENT 2: Speed Limiting (Clipping)
+                    # Reduced from 0.5 to 0.15 to prevent fingers from phasing through the cube during fast movements
                     delta_q = smoothed_qpos - self.last_qpos
                     target_qpos = self.last_qpos + np.clip(delta_q, -0.15, 0.15)
                     self.last_qpos = target_qpos

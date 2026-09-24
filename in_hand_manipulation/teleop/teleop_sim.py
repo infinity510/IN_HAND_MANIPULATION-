@@ -35,6 +35,9 @@ class TeleopSystem:
         
         self.clutch_active = False
         self.absolute_mode = False
+        self.calibrated_pinch_distances = None
+        self.calibrated_pinch_angles = None
+        self.local_centroid = None
         self.trigger_reset = False
         self.human_anchor = None
         self.robot_anchor = None
@@ -170,15 +173,15 @@ class TeleopSystem:
                         direct_qpos = None
                         target_qpos = None
                         
-                        # ==========================================
-                        # ABSOLUTE MAPPING (Triggered by 'o')
-                        # ==========================================
-                        if self.absolute_mode and valid_tracking:
+                        wrist_pos = tracking_out.get(3)
+                        if wrist_pos is None:
+                            valid_tracking = False
+                        
+                                                if self.absolute_mode or self.clutch_active:
                             human_pos = np.array(human_pos)
-                            centroid = np.mean(human_pos, axis=0)
+                            centroid = wrist_pos
                             centered = human_pos - centroid
                             
-                            # 1. Find overall hand rotation (align Thumb to +X)
                             p0 = centered[0, :2]
                             p1 = centered[1, :2]
                             p2 = centered[2, :2]
@@ -187,7 +190,6 @@ class TeleopSystem:
                             v_human /= v_len
                             theta_hand = np.arctan2(v_human[1], v_human[0])
                             
-                            # 2. Rotate all points into the canonical hand frame
                             c, s = np.cos(-theta_hand), np.sin(-theta_hand)
                             R_2d = np.array([[c, -s], [s, c]])
                             
@@ -195,124 +197,95 @@ class TeleopSystem:
                             for i in range(3):
                                 aligned[i, :2] = R_2d @ centered[i, :2]
                                 
-                            # 3. Independent Finger Mapping (Curl Only)
-                            # We lock the tripod (m1) and sway (m2) to guarantee the fingers NEVER cross or tangle!
-                            curls = []
-                            for i in range(3):
-                                pt = aligned[i, :2]
-                                r = np.linalg.norm(pt)
+                            if self.local_centroid is None:
+                                self.local_centroid = np.mean(aligned, axis=0)
+                                vecs_curl = aligned[:, :2] - self.local_centroid[:2]
+                                self.calibrated_pinch_distances = [np.linalg.norm(v) for v in vecs_curl]
+                                self.calibrated_pinch_angles = [np.arctan2(aligned[i, 1], aligned[i, 0]) for i in range(3)]
                                 
-                                # Distance from center -> Curl (m3, m4)
-                                # Tuning: r=0.02 (pinch) -> curl=1.7 (touching), r=0.06 (open) -> curl=0.7 (flat)
-                                curl_i = 1.7 - (r - 0.02) * 25.0
-                                curl_i = np.clip(curl_i, -0.2, 2.0)
-                                curls.append(curl_i)
-                                
-                            # 4. Apply to joints
-                            direct_qpos = self.last_qpos.copy()
-                            
-                            # Lock m1 to perfect 120-degree tripod
-                            for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
-                                try:
-                                    idx = self.joint_names.index(j_name)
-                                    direct_qpos[idx] = base_val
-                                except: pass
-                                
-                            # Apply independent curl (m3, m4) and lock sway (m2)
-                            for i, f_idx in enumerate([1, 2, 3]):
-                                # Lock Sway (m2) to 0
-                                try:
-                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                    direct_qpos[idx] = 0.0
-                                except: pass
-                                
-                                # Apply Curl (m3, m4)
-                                for m_idx in [3, 4]:
+                            if self.absolute_mode:
+                                curls = []
+                                sways = []
+                                for i in range(3):
+                                    vec_for_curl = aligned[i, :2] - self.local_centroid[:2]
+                                    r = np.linalg.norm(vec_for_curl)
+                                    
+                                    angle = np.arctan2(aligned[i, 1], aligned[i, 0])
+                                    
+                                    curl_i = 0.8 - (r - self.calibrated_pinch_distances[i]) * 25.0
+                                    curl_i = np.clip(curl_i, -0.2, 2.0)
+                                    curls.append(curl_i)
+                                    
+                                    delta_angle = angle - self.calibrated_pinch_angles[i]
+                                    delta_angle = (delta_angle + np.pi) % (2 * np.pi) - np.pi
+                                    sway_i = np.clip(delta_angle * 1.5, -0.6, 0.6)
+                                    sways.append(sway_i)
+                                    
+                                direct_qpos = self.last_qpos.copy()
+                                for j_name, base_val in [("gripper_f1m1_joint", 0.0), ("gripper_f2m1_joint", -1.047), ("gripper_f3m1_joint", 1.047)]:
                                     try:
-                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
-                                        direct_qpos[idx] = curls[i]
+                                        idx = self.joint_names.index(j_name)
+                                        direct_qpos[idx] = base_val
                                     except: pass
-
-                        # ==========================================
-                        # ULTIMATE HYBRID TELEOP MAPPING (SPACEBAR)
-                        # ==========================================
-                        elif self.clutch_active and valid_tracking and not self.absolute_mode:
-                            human_pos = np.array(human_pos)
-                            
-                            # Calculate centroid to safeguard against global palm/arm movement
-                            current_centroid = np.mean(human_pos, axis=0)
-                            centered = human_pos - current_centroid
-                            
-                            # 1. Overall Hand Twist (Theta)
-                            p0, p1, p2 = centered[0, :2], centered[1, :2], centered[2, :2]
-                            v_human = p0 - (p1 + p2) / 2.0
-                            theta_hand = np.arctan2(v_human[1], v_human[0])
-                            
-                            # 2. Independent Finger Angles and Spreads
-                            c, s = np.cos(-theta_hand), np.sin(-theta_hand)
-                            R_2d = np.array([[c, -s], [s, c]])
-                            aligned = np.zeros_like(centered)
-                            for i in range(3):
-                                aligned[i, :2] = R_2d @ centered[i, :2]
-                                
-                            finger_angles = []
-                            finger_spreads = []
-                            for i in range(3):
-                                pt = aligned[i, :2]
-                                finger_spreads.append(np.linalg.norm(pt))
-                                finger_angles.append(np.arctan2(pt[1], pt[0]))
-                                
-                            # Initialization at Clutch-In
-                            if self.human_anchor is None:
-                                self.human_anchor = True # Flag
-                                self.init_theta = theta_hand
-                                self.init_finger_angles = finger_angles
-                                self.init_robot_qpos = self.last_qpos.copy()
-                                
-                            target_qpos = self.init_robot_qpos.copy()
-                            
-                            # A. TWIST (m1): Delta from initial twist
-                            twist_delta = theta_hand - self.init_theta
-                            twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
-                            twist_delta *= 1.2 # Sensitivity
-                            
-                            # Apply twist to the static tripod base values
-                            tripod_bases = [0.0, -1.047, 1.047]
-                            for i, j_name in enumerate(["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]):
-                                try:
-                                    idx = self.joint_names.index(j_name)
-                                    target_qpos[idx] = np.clip(tripod_bases[i] + twist_delta, -1.9, 2.0)
-                                except: pass
-                                
-                            for i, f_idx in enumerate([1, 2, 3]):
-                                # B. SWAY (m2): Delta from initial finger angles
-                                angle_delta = finger_angles[i] - self.init_finger_angles[i]
-                                angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
-                                
-                                try:
-                                    idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
-                                    target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * 1.5, -0.6, 0.6)
-                                except: pass
-                                
-                                # C. CURL (m3, m4): Absolute spread mapping (Perfect Pinch)
-                                r = finger_spreads[i]
-                                curl_i = 1.7 - (r - 0.02) * 25.0
-                                curl_i = np.clip(curl_i, -0.2, 2.2)
-                                
-                                for m_idx in [3, 4]:
+                                    
+                                for i, f_idx in enumerate([1, 2, 3]):
                                     try:
-                                        idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
-                                        target_qpos[idx] = curl_i
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                        direct_qpos[idx] = sways[i]
                                     except: pass
+                                    for m_idx in [3, 4]:
+                                        try:
+                                            idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                            direct_qpos[idx] = curls[i]
+                                        except: pass
+                                        
+                                target_qpos = direct_qpos
                                 
-                        elif not self.clutch_active:
-                            self.human_anchor = None
-                            
-                        # ==========================================
-                        # APPLY JOINTS (Bypassing IK Solver!)
-                        # ==========================================
-                        if direct_qpos is not None:
-                            target_qpos = direct_qpos
+                            elif self.clutch_active:
+                                finger_angles = []
+                                finger_spreads = []
+                                for i in range(3):
+                                    vec_for_curl = aligned[i, :2] - self.local_centroid[:2]
+                                    finger_spreads.append(np.linalg.norm(vec_for_curl))
+                                    finger_angles.append(np.arctan2(aligned[i, 1], aligned[i, 0]))
+                                    
+                                if self.human_anchor is None:
+                                    self.human_anchor = True
+                                    self.init_theta = theta_hand
+                                    self.init_robot_qpos = self.last_qpos.copy()
+                                    
+                                target_qpos = self.init_robot_qpos.copy()
+                                
+                                twist_delta = theta_hand - self.init_theta
+                                twist_delta = (twist_delta + np.pi) % (2 * np.pi) - np.pi
+                                twist_delta *= 1.2
+                                
+                                tripod_bases = [0.0, -1.047, 1.047]
+                                for i, j_name in enumerate(["gripper_f1m1_joint", "gripper_f2m1_joint", "gripper_f3m1_joint"]):
+                                    try:
+                                        idx = self.joint_names.index(j_name)
+                                        target_qpos[idx] = np.clip(tripod_bases[i] + twist_delta, -1.9, 2.0)
+                                    except: pass
+                                    
+                                sway_scales = [0.5, 3.5, 3.5]  # Thumb (f1) scaled down, Index/Middle (f2,f3) scaled up
+                                for i, f_idx in enumerate([1, 2, 3]):
+                                    angle_delta = finger_angles[i] - self.calibrated_pinch_angles[i]
+                                    angle_delta = (angle_delta + np.pi) % (2 * np.pi) - np.pi
+                                    
+                                    try:
+                                        idx = self.joint_names.index(f"gripper_f{f_idx}m2_joint")
+                                        target_qpos[idx] = np.clip(self.init_robot_qpos[idx] + angle_delta * sway_scales[i], -0.6, 0.6)
+                                    except: pass
+                                    
+                                    r = finger_spreads[i]
+                                    curl_i = 0.8 - (r - self.calibrated_pinch_distances[i]) * 25.0
+                                    curl_i = np.clip(curl_i, -0.2, 2.2)
+                                    
+                                    for m_idx in [3, 4]:
+                                        try:
+                                            idx = self.joint_names.index(f"gripper_f{f_idx}m{m_idx}_joint")
+                                            target_qpos[idx] = curl_i
+                                        except: pass
                             
                         if target_qpos is not None:
                             delta_q = target_qpos - self.last_qpos

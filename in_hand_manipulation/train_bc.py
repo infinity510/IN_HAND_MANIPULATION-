@@ -221,7 +221,7 @@ def train():
     
     # Optimization Setup
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
-    epochs = 50
+    epochs = 100
     scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
     criterion = nn.MSELoss()
     

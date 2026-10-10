@@ -99,6 +99,22 @@ class BCEvaluator:
                 
                 # Automatically cycle objects and targets every 5 seconds
                 if time.time() - last_switch_time > 5.0:
+                    # Print achieved orientation and error before switching
+                    try:
+                        obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object}_joint").id]
+                        curr_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
+                        print(f"\nFinal Achieved Orientation: {np.round(curr_quat, 2)}")
+                        
+                        # Calculate error in degrees using Scipy [x, y, z, w]
+                        t_q_scipy = [self.target_quat[1], self.target_quat[2], self.target_quat[3], self.target_quat[0]]
+                        o_q_scipy = [curr_quat[1], curr_quat[2], curr_quat[3], curr_quat[0]]
+                        r_target = R.from_quat(t_q_scipy)
+                        r_achieved = R.from_quat(o_q_scipy)
+                        error_angle = (r_target * r_achieved.inv()).magnitude() * (180.0 / np.pi)
+                        print(f"Rotational Error: {error_angle:.2f} degrees")
+                    except Exception:
+                        pass
+                        
                     self.active_object += 1
                     if self.active_object > 3:
                         self.active_object = 1

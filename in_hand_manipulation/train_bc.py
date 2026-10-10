@@ -286,7 +286,7 @@ def train():
                 'hyperparameters': {
                     'obs_dim': 39,
                     'act_dim': 12,
-                    'hidden_dims': [256, 256]
+                    'hidden_dims': [512, 512, 256]
                 }
             }
             torch.save(checkpoint, os.path.join(base_dir, 'bc_actor_checkpoint.pth'))

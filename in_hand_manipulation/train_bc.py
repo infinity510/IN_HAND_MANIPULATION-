@@ -193,9 +193,10 @@ class ActorNetwork(nn.Module):
 def train():
     # Attempt to locate the dataset (supports both explicit and raw teleop files)
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    data_dir = os.path.join(base_dir, 'data_processed')
+    parent_dir = os.path.dirname(base_dir) # Go up to DC_PROJECT
+    data_dir = os.path.join(parent_dir, 'data_processed')
     if not os.path.exists(data_dir):
-        data_dir = os.path.join(base_dir, 'data')
+        data_dir = os.path.join(parent_dir, 'data')
     
     print(f"Reading dataset from: {data_dir}")
     

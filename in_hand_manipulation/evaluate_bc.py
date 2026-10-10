@@ -181,3 +181,4 @@ class BCEvaluator:
 if __name__ == "__main__":
     evaluator = BCEvaluator()
     evaluator.run()
+

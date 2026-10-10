@@ -230,7 +230,8 @@ def train():
     # Optimization Setup
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
     epochs = 100
-    scheduler = CosineAnnealingLR(optimizer, T_max=epochs)
+    # Use ReduceLROnPlateau (better for BC than CosineAnnealing, drops LR only when validation loss plateaus)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
     criterion = nn.MSELoss()
     
     best_val_loss = float('inf')
@@ -268,9 +269,10 @@ def train():
         val_loss /= len(val_loader.dataset)
         
         # Step the learning rate scheduler
-        scheduler.step()
+        scheduler.step(val_loss)
         
-        print(f"Epoch [{epoch+1:02d}/{epochs}] | Train Loss (MSE): {train_loss:.4f} | Val Loss (MSE): {val_loss:.4f} | LR: {scheduler.get_last_lr()[0]:.2e}")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch [{epoch+1:02d}/{epochs}] | Train Loss (MSE): {train_loss:.4f} | Val Loss (MSE): {val_loss:.4f} | LR: {current_lr:.2e}")
         
         # Checkpointing
         if val_loss < best_val_loss:

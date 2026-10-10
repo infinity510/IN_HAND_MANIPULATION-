@@ -40,15 +40,17 @@ class BCDataset(Dataset):
                             rv = np.array(node['robot_qvel'], dtype=np.float32)
                             op = np.array(node['object_pos'], dtype=np.float32)
                             oq = np.array(node['object_quat'], dtype=np.float32)
+                            act = np.array(node['action'], dtype=np.float32)
+                            
+                            # Handle off-by-one frame mismatches from collection interruptions
+                            min_len = min(len(rq), len(rv), len(op), len(oq), len(act))
+                            rq, rv, op, oq, act = rq[:min_len], rv[:min_len], op[:min_len], oq[:min_len], act[:min_len]
+
                             # Create dummy target quat if missing, else load it
                             tq_val = node.attrs.get('target_quat', [1.0, 0.0, 0.0, 0.0])
-                            tq = np.tile(tq_val, (len(rq), 1)).astype(np.float32)
+                            tq = np.tile(tq_val, (min_len, 1)).astype(np.float32)
                             
                             # Map Object ID to Physical Parameters: [radius/width, height, mass, friction]
-                            # Based on scene_cube.xml definitions:
-                            # ID 1 (Cylinder): r=0.045, h=0.07, mass=1.0, friction=3.0
-                            # ID 2 (Cube):     w=0.045, h=0.045, mass=1.0, friction=3.0
-                            # ID 3 (Cuboid):   w=0.055, h=0.07, mass=1.0, friction=3.0
                             obj_id = int(node.attrs.get('object_id', 1))
                             if obj_id == 1:
                                 phys_params = [0.045, 0.07, 1.0, 3.0]
@@ -59,10 +61,9 @@ class BCDataset(Dataset):
                             else:
                                 phys_params = [0.045, 0.07, 1.0, 3.0] # Fallback to Cylinder
                                 
-                            phys_array = np.tile(phys_params, (len(rq), 1)).astype(np.float32)
+                            phys_array = np.tile(phys_params, (min_len, 1)).astype(np.float32)
                             
                             obs = np.concatenate([rq, rv, op, oq, tq, phys_array], axis=-1)
-                            act = np.array(node['action'], dtype=np.float32)
                             all_obs.append(obs)
                             all_acts.append(act)
                         elif 'observations' in node and 'actions' in node:
@@ -154,10 +155,9 @@ class ActorNetwork(nn.Module):
             nn.Tanh()
         )
         
-        # Mean Action Head (Bounded to [-1, 1] naturally by Tanh)
+        # Mean Action Head (Unbounded to allow raw joint angles)
         self.mu_head = nn.Sequential(
-            nn.Linear(hidden_dim, act_dim),
-            nn.Tanh()
+            nn.Linear(hidden_dim, act_dim)
         )
         
         # Standalone learnable exploration standard deviation (~0.1 rad = exp(-2.3))

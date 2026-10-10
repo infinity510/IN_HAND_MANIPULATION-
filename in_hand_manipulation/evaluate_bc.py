@@ -26,7 +26,7 @@ class BCEvaluator:
             raise FileNotFoundError(f"Checkpoint not found at {CHECKPOINT_PATH}. Please run train_bc.py first!")
             
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device)
+        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
         
         self.obs_mean = checkpoint['obs_mean']
         self.obs_std = checkpoint['obs_std']
@@ -77,38 +77,40 @@ class BCEvaluator:
         return [0.045, 0.07, 1.0, 3.0]
 
     def run(self):
-        listener = keyboard.Listener(on_press=self.on_press)
-        listener.start()
-        
         print("\n" + "="*50)
         print("LIVE BC EVALUATION STARTED")
-        print("Controls:")
-        print(" [1] Spawn Cylinder")
-        print(" [2] Spawn Cube")
-        print(" [3] Spawn Cuboid")
-        print(" [r] Randomize Target Orientation")
-        print(" [q] Quit")
+        print("The script will automatically switch objects and target orientations every 5 seconds.")
+        print("Close the MuJoCo window to stop.")
         print("="*50 + "\n")
         
         mujoco.mj_resetData(self.model, self.data)
         
         with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
-            # Enable contact point rendering for debugging grasps
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = True
             
-            # Initial spawn
-            self.spawn_requested = 1
+            last_switch_time = time.time()
+            self.active_object = 1
+            self.spawn_requested = self.active_object
+            self.randomize_target_requested = True
             
             while viewer.is_running() and self.is_running:
                 step_start = time.time()
+                
+                # Automatically cycle objects and targets every 5 seconds
+                if time.time() - last_switch_time > 5.0:
+                    self.active_object += 1
+                    if self.active_object > 3:
+                        self.active_object = 1
+                    self.spawn_requested = self.active_object
+                    self.randomize_target_requested = True
+                    last_switch_time = time.time()
                 
                 # Handle Object Spawning
                 if self.spawn_requested is not None:
                     obj_id = self.spawn_requested
                     self.spawn_requested = None
-                    self.active_object = obj_id
-                    print(f"Spawning object {obj_id}...")
+                    print(f"\n---> Spawning object {obj_id}...")
                     
                     for i in range(1, 4):
                         try:
@@ -129,7 +131,7 @@ class BCEvaluator:
                     self.randomize_target_requested = False
                     q = R.random().as_quat() # [x, y, z, w]
                     self.target_quat = np.array([q[3], q[0], q[1], q[2]]) # MuJoCo format: [w, x, y, z]
-                    print(f"New Target Orientation: {np.round(self.target_quat, 2)}")
+                    print(f"---> New Target Orientation: {np.round(self.target_quat, 2)}")
                 
                 # 1. Gather Observation
                 r_qpos = [self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names]

@@ -147,17 +147,25 @@ class ActorNetwork(nn.Module):
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         
-        # Hidden Layers
+        # Hidden Layers (Upgraded: Deeper, LayerNorm, Dropout)
         self.net = nn.Sequential(
-            nn.Linear(obs_dim, hidden_dim),
+            nn.Linear(obs_dim, 512),
+            nn.LayerNorm(512),
             nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh()
+            nn.Dropout(p=0.1),
+            nn.Linear(512, 512),
+            nn.LayerNorm(512),
+            nn.Tanh(),
+            nn.Dropout(p=0.1),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.Tanh(),
+            nn.Dropout(p=0.1)
         )
         
         # Mean Action Head (Unbounded to allow raw joint angles)
         self.mu_head = nn.Sequential(
-            nn.Linear(hidden_dim, act_dim)
+            nn.Linear(256, act_dim)
         )
         
         # Standalone learnable exploration standard deviation (~0.1 rad = exp(-2.3))

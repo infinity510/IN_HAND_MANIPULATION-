@@ -231,7 +231,7 @@ def train():
     optimizer = optim.Adam(model.parameters(), lr=3e-4, weight_decay=1e-4)
     epochs = 100
     # Use ReduceLROnPlateau (better for BC than CosineAnnealing, drops LR only when validation loss plateaus)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
     criterion = nn.MSELoss()
     
     best_val_loss = float('inf')

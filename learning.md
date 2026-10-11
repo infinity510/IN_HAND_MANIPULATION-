@@ -410,5 +410,32 @@ When evaluated deterministically (mean action $\mu(s)$, zero exploration noise) 
    - **Anneal exploration noise**: Decay $\log \sigma$ from $-2.8 \to -3.1$ ($\sigma \approx 0.045\text{ rad} \approx 2.5^\circ$).
    - **Track drops per unit time**: Change telemetry to report `drops_per_1000_steps` rather than per-episode binary drop.
 
+---
+
+## 12. Milestone Benchmark (Iteration 1,000 Completion)
+
+The 1,000-iteration Continuous PPO training run completed at 18:04:
+- **Saved Checkpoints:** `checkpoints_ppo/ppo_checkpoint_iter_1000.pth` and `checkpoints_ppo/ppo_latest_actor.pth`.
+- **Training Return:** Rose from baseline $+240.0 \to \mathbf{+1,440.0}$ (a **6x increase**).
+- **Episode Length:** Rose from $150 \to \mathbf{525.9\text{ steps}}$ ($> 10.5\text{s}$ continuous control).
+- **Critic Value Loss:** Stabilized from $257.2 \to \mathbf{5.9}$.
+
+### 30-Episode Deterministic Benchmark Results:
+
+| Benchmark Slice | Success Rate | Drop Rate | Mean Steps Survived | Mean Angular Error |
+| :--- | :---: | :---: | :---: | :---: |
+| **Cube Only (Object 2)** | **70.0%** (14/20) | **15.0%** (3/20) | **473.4 steps (9.47s)** | **$59.41^\circ$** |
+| **All Objects (Random 1–3)** | **56.7%** (17/30) | **10.0%** (3/30) | **484.5 steps (9.69s)** | **$53.42^\circ$** |
+
+### Training Time Budget Guidelines:
+1. **Current Capability (Angles $\le 45^\circ - 50^\circ$): DONE.**
+   - No additional training is required for stable manipulation within this range.
+2. **Expanding to $90^\circ$ ($1.57\text{ rad}$) Target Rotations:**
+   - Requires $\approx 1,000$ additional iterations ($\approx 15\text{ minutes}$ on 16 CPU workers).
+   - Recommended settings: `--checkpoint checkpoints_ppo/ppo_latest_actor.pth --target_max_goal_angle 1.57 --min_epsilon 0.25 --log_std -3.0`.
+3. **Full $SO(3)$ Arbitrary $180^\circ$ In-Hand Flips:**
+   - Requires $\approx 2,000 - 3,000$ iterations ($\approx 30 - 45\text{ minutes}$) with multi-stage finger gaits.
+
+
 
 

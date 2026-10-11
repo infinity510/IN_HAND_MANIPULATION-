@@ -167,10 +167,12 @@ class BCEvaluator:
         max_goal_angle: float = 0.80,
         object_id: Optional[int] = None,
         inter_episode_delay: float = 1.0,
+        success_ratio: float = 0.10,
     ):
         print("\n" + "="*65)
         print("STARTING BEHAVIORAL CLONING (BC) POLICY EVALUATION")
         print(f"Max Goal Angle: {max_goal_angle:.2f} rad ({np.degrees(max_goal_angle):.1f}°) | Target Object: {object_id or 'Random (1-3)'}")
+        print(f"Success Threshold Law: Proportional {success_ratio * 100:.0f}% of actual rotation angle (Dynamic per Episode)")
         print(f"Angle-Horizon Law: Quadratic Scaling [200 + 150*theta + 150*theta^2] capped at 800 steps")
         print(f"Trajectory Pause: {inter_episode_delay:.1f}s between episodes with live green target arrow")
         print("="*65 + "\n")
@@ -202,12 +204,17 @@ class BCEvaluator:
                 initial_err = compute_angular_distance(cur_obj_quat, target_quat)
                 initial_deg = np.degrees(initial_err)
                 
+                # Dynamic Success Threshold: 10% of the actual required rotation angle
+                eval_epsilon_rad = max(0.015, success_ratio * initial_err)
+                eval_epsilon_deg = float(np.degrees(eval_epsilon_rad))
+                
                 # Quadratic Horizon Law
                 quad_steps = int(200 + 150 * initial_err + 150 * (initial_err ** 2))
                 max_steps = min(800, quad_steps)
                 
                 print(f"\n[Episode {ep:02d}/{num_episodes:02d}] Object: {curr_obj_id} | "
                       f"Initial Target Angle: {initial_deg:5.1f}° | "
+                      f"Success Threshold ({success_ratio * 100:.0f}%): <= {eval_epsilon_deg:4.2f}° | "
                       f"Allocated Horizon: {max_steps} steps ({max_steps * 0.02:.2f}s)")
                 
                 step = 0
@@ -250,7 +257,7 @@ class BCEvaluator:
                     d_theta = compute_angular_distance(cur_obj_quat, target_quat)
                     final_err_deg = float(np.degrees(d_theta))
                     
-                    if d_theta < 0.28:  # 16 deg tolerance
+                    if d_theta <= eval_epsilon_rad:
                         is_success = True
                     if cur_obj_pos[2] < 0.02 or np.linalg.norm(cur_obj_pos[:2]) > 0.20:
                         is_dropped = True
@@ -270,9 +277,9 @@ class BCEvaluator:
                 if is_dropped:
                     drops += 1
                     
-                status_str = "SUCCESS" if is_success else ("DROPPED" if is_dropped else "TIME_LIMIT")
+                status_str = f"SUCCESS (<= {eval_epsilon_deg:.1f}°)" if is_success else ("DROPPED" if is_dropped else f"TIME_LIMIT ({final_err_deg:.1f}° > {eval_epsilon_deg:.1f}°)")
                 print(f"  Finished: Steps: {step:3d}/{max_steps} | "
-                      f"Final Error: {final_err_deg:5.2f}° | "
+                      f"Final Error: {final_err_deg:5.2f}° (Threshold: <= {eval_epsilon_deg:.2f}°) | "
                       f"Status: {status_str}")
 
                 if ep < num_episodes:
@@ -292,6 +299,7 @@ class BCEvaluator:
         if episode_lengths:
             print("\n" + "="*65)
             print(f"BC EVALUATION SUMMARY ({len(episode_lengths)} Episodes Completed):")
+            print(f"Evaluation Threshold Law: Proportional {success_ratio * 100:.0f}% of required rotation angle")
             print(f"Success Rate:       {successes / len(episode_lengths) * 100:5.1f}% ({successes}/{len(episode_lengths)})")
             print(f"Drop Rate:          {drops / len(episode_lengths) * 100:5.1f}% ({drops}/{len(episode_lengths)})")
             print(f"Mean Steps:         {np.mean(episode_lengths):.1f} steps ({np.mean(episode_lengths)*0.02:.2f}s)")
@@ -307,6 +315,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Max target rotation angle in radians (default: 0.80 rad ~= 45.8 deg)")
     parser.add_argument("--object_id", type=int, default=0, help="Target object: 0=random, 1=cylinder, 2=cube, 3=cuboid (default: 0)")
     parser.add_argument("--delay", type=float, default=1.0, help="Inter-episode delay in seconds (default: 1.0s)")
+    parser.add_argument("--success_ratio", type=float, default=0.10, help="Success threshold ratio relative to target angle (default: 0.10 = 10%% of target angle)")
     parser.add_argument("--no_render", action="store_true", help="Disable 3D viewer for fast headless benchmarking")
     args = parser.parse_args()
     
@@ -320,4 +329,5 @@ if __name__ == "__main__":
         max_goal_angle=args.max_goal_angle,
         object_id=args.object_id if args.object_id > 0 else None,
         inter_episode_delay=args.delay,
+        success_ratio=args.success_ratio,
     )

@@ -239,6 +239,10 @@ class DeltoInHandManipulationEnv:
         """Updates maximum goal rotation angle for curriculum training."""
         self.max_goal_angle = float(max_angle)
 
+    def set_epsilon(self, epsilon: float):
+        """Updates goal orientation tolerance epsilon in radians."""
+        self.reward_weights.epsilon = float(epsilon)
+
     def _sample_target_quat(self) -> np.ndarray:
         """
         Samples a new 3D target quaternion [w, x, y, z] in SO(3).

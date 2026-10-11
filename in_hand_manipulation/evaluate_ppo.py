@@ -60,6 +60,7 @@ def evaluate(
     object_id: Optional[int] = None,
     dr_ratio: float = 0.20,
     inter_episode_delay: float = 1.0,
+    success_ratio: float = 0.10,
 ):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Loading checkpoint from: {checkpoint_path}")
@@ -93,6 +94,7 @@ def evaluate(
     print("\n" + "="*65)
     print("STARTING PPO POLICY EVALUATION")
     print(f"Max Goal Angle: {max_goal_angle:.2f} rad ({np.degrees(max_goal_angle):.1f}°) | Target Object: {object_id or 'Random (1-3)'}")
+    print(f"Success Threshold Law: Proportional {success_ratio * 100:.0f}% of actual rotation angle (Dynamic per Episode)")
     print(f"Angle-Horizon Law: Quadratic Scaling [200 + 150*theta + 150*theta^2] capped at 800 steps")
     print(f"Trajectory Pause: {inter_episode_delay:.1f}s between episodes with live green target arrow")
     print("="*65 + "\n")
@@ -122,10 +124,18 @@ def evaluate(
             truncated = False
             step_info = {}
             
-            init_angle = info.get("initial_angle_deg", np.degrees(info.get("d_theta", 0.0)))
+            init_angle_deg = info.get("initial_angle_deg", np.degrees(info.get("d_theta", 0.0)))
+            init_angle_rad = np.radians(init_angle_deg)
+            
+            # Dynamic Success Threshold: 10% of the actual required rotation angle
+            eval_epsilon_rad = max(0.015, success_ratio * init_angle_rad)
+            eval_epsilon_deg = float(np.degrees(eval_epsilon_rad))
+            env.set_epsilon(eval_epsilon_rad)
+            
             max_steps = info.get("max_steps", env.current_max_steps)
             print(f"\n[Episode {ep:02d}/{num_episodes:02d}] Object: {info['object_id']} | "
-                  f"Initial Target Angle: {init_angle:5.1f}° | "
+                  f"Initial Target Angle: {init_angle_deg:5.1f}° | "
+                  f"Success Threshold ({success_ratio * 100:.0f}%): <= {eval_epsilon_deg:4.2f}° | "
                   f"Allocated Horizon: {max_steps} steps ({max_steps * 0.02:.2f}s)")
             
             # Helper to get current object world position
@@ -156,8 +166,8 @@ def evaluate(
                         time.sleep(0.02 - elapsed)
                         
             final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
-            is_succ = step_info.get("is_success", False)
-            is_drop = step_info.get("is_dropped", False)
+            is_succ = bool(final_err_deg <= eval_epsilon_deg or step_info.get("is_success", False))
+            is_drop = bool(step_info.get("is_dropped", False))
             
             errors_deg.append(final_err_deg)
             episode_lengths.append(step)
@@ -166,10 +176,10 @@ def evaluate(
             if is_drop:
                 drops += 1
                 
-            status_str = "SUCCESS" if is_succ else ("DROPPED" if is_drop else "TIME_LIMIT")
+            status_str = f"SUCCESS (<= {eval_epsilon_deg:.1f}°)" if is_succ else ("DROPPED" if is_drop else f"TIME_LIMIT ({final_err_deg:.1f}° > {eval_epsilon_deg:.1f}°)")
             print(f"  Finished: Steps: {step:3d}/{max_steps} | "
                   f"Reward: {ep_reward:7.1f} | "
-                  f"Error: {final_err_deg:5.2f}° | "
+                  f"Final Error: {final_err_deg:5.2f}° (Threshold: <= {eval_epsilon_deg:.2f}°) | "
                   f"Status: {status_str}")
             
             # Inter-episode delay (1.0 second) allowing visual review of final state
@@ -191,6 +201,7 @@ def evaluate(
     if episode_lengths:
         print("\n" + "="*65)
         print(f"EVALUATION SUMMARY ({len(episode_lengths)} Episodes Completed):")
+        print(f"Evaluation Threshold Law: Proportional {success_ratio * 100:.0f}% of required rotation angle")
         print(f"Success Rate:       {successes / len(episode_lengths) * 100:5.1f}% ({successes}/{len(episode_lengths)})")
         print(f"Drop Rate:          {drops / len(episode_lengths) * 100:5.1f}% ({drops}/{len(episode_lengths)})")
         print(f"Mean Steps:         {np.mean(episode_lengths):.1f} steps ({np.mean(episode_lengths)*0.02:.2f}s)")
@@ -207,6 +218,7 @@ if __name__ == "__main__":
     parser.add_argument("--object_id", type=int, default=0, help="Target object: 0=random, 1=cylinder, 2=cube, 3=cuboid (default: 0)")
     parser.add_argument("--dr_ratio", type=float, default=0.20, help="Domain randomization ratio (default: 0.20)")
     parser.add_argument("--delay", type=float, default=1.0, help="Inter-episode delay in seconds (default: 1.0s)")
+    parser.add_argument("--success_ratio", type=float, default=0.10, help="Success threshold ratio relative to target angle (default: 0.10 = 10%% of target angle)")
     parser.add_argument("--no_render", action="store_true", help="Disable 3D viewer for fast headless benchmarking")
     args = parser.parse_args()
     
@@ -219,4 +231,5 @@ if __name__ == "__main__":
         object_id=args.object_id if args.object_id > 0 else None,
         dr_ratio=args.dr_ratio,
         inter_episode_delay=args.delay,
+        success_ratio=args.success_ratio,
     )

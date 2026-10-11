@@ -564,6 +564,36 @@ Integrated a dynamic visual target marker into MuJoCo's runtime user scene (`vie
 - **`evaluate_bc.py`**: Completely overhauled from hardcoded 5-second timers; eliminated dead `pynput` keyboard hooks; added full metric tracking (success rate, drop rate, mean error, steps), quadratic horizon, target arrows, and headless `--no_render` support.
 
 
+## 17. Evaluation Success Thresholds: From Fixed Epsilon to Proportional 10% Angular Error
+
+### 1. The Previous Success Thresholds in the Codebase:
+- **In Training Environment (`train_ppo.py`):** The default indicator function is:
+  $$\mathbb{I}_{\text{success}} = [d_\theta < \epsilon], \quad \epsilon = 0.35\text{ rad } (\approx 20.0^\circ)$$
+  Under curriculum (`--curriculum_epsilon`), this contracts down to $\epsilon \approx 0.12 - 0.28\text{ rad } (\approx 6.9^\circ - 16.0^\circ)$.
+- **In Baseline Evaluation (`evaluate_bc.py`):** Previously had a hardcoded constant:
+  $$\mathbb{I}_{\text{success}} = [d_\theta < 0.28\text{ rad } (\approx 16.0^\circ)]$$
+
+### 2. Flaw of Absolute Fixed Thresholds:
+An absolute threshold $\epsilon = 20^\circ$ evaluates all goals uniformly regardless of task difficulty:
+- For a small target of $\theta_{\text{target}} = 22.0^\circ$, an agent that barely nudges the object by $2.1^\circ$ was awarded full success ($d_\theta = 19.9^\circ < 20.0^\circ$).
+- For an ambitious target of $\theta_{\text{target}} = 85.0^\circ$, an agent that executed complex finger gaiting to rotate the cube by $63.0^\circ$ ($d_\theta = 22.0^\circ$) was penalized as a complete failure ($22.0^\circ > 20.0^\circ$), despite reducing $74\%$ of the initial angular distance!
+
+### 3. The New Proportional 10% Evaluation Law (Evaluation Only):
+To rigorously assess genuine rotational accuracy without distorting RL training rewards, evaluation scripts now calculate a dynamic, angle-proportional success threshold per episode:
+$$\epsilon_{\text{eval}}(\theta) = \max\left(0.015\text{ rad } (0.86^\circ), \, \text{success\_ratio} \times \theta_{\text{actual}}\right), \quad \text{default } \text{success\_ratio} = 0.10$$
+
+| Required Rotation ($\theta_{\text{actual}}$) | Success Threshold ($\le 10\%$) | Accuracy Required |
+| :---: | :---: | :---: |
+| **$20.0^\circ$** ($0.35\text{ rad}$) | $\mathbf{\le 2.00^\circ}$ ($0.035\text{ rad}$) | **$90.0\%$ Rotational Closure** |
+| **$35.0^\circ$** ($0.61\text{ rad}$) | $\mathbf{\le 3.50^\circ}$ ($0.061\text{ rad}$) | **$90.0\%$ Rotational Closure** |
+| **$50.0^\circ$** ($0.87\text{ rad}$) | $\mathbf{\le 5.00^\circ}$ ($0.087\text{ rad}$) | **$90.0\%$ Rotational Closure** |
+| **$80.0^\circ$** ($1.40\text{ rad}$) | $\mathbf{\le 8.00^\circ}$ ($0.140\text{ rad}$) | **$90.0\%$ Rotational Closure** |
+
+- **Training Integrity Preserved:** Training environment rewards remain smooth and dense, avoiding sparse-reward collapse.
+- **Evaluation Precision Validated:** Both `evaluate_ppo.py` and `evaluate_bc.py` support `--success_ratio 0.10` and explicitly print target angle, dynamic threshold, and final error.
+
+
+
 
 
 

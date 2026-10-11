@@ -76,6 +76,32 @@ class BCEvaluator:
             return [0.055, 0.07, 1.0, 3.0]
         return [0.045, 0.07, 1.0, 3.0]
 
+    def reset_gripper(self):
+        """Resets the Delto gripper joints, velocities, and actuators to the canonical starting pinch tripod pose."""
+        initial_pose = [
+            ("gripper_f1m1_joint", 0.0), ("gripper_f1m2_joint", 0.0),
+            ("gripper_f1m3_joint", 0.8), ("gripper_f1m4_joint", 0.8),
+            ("gripper_f2m1_joint", -1.047), ("gripper_f2m2_joint", 0.0),
+            ("gripper_f2m3_joint", 0.8), ("gripper_f2m4_joint", 0.8),
+            ("gripper_f3m1_joint", 1.047), ("gripper_f3m2_joint", 0.0),
+            ("gripper_f3m3_joint", 0.8), ("gripper_f3m4_joint", 0.8),
+        ]
+        for name, val in initial_pose:
+            try:
+                j_id = self.model.joint(name).id
+                qpos_idx = self.model.jnt_qposadr[j_id]
+                vel_idx = self.model.jnt_dofadr[j_id]
+                self.data.qpos[qpos_idx] = val
+                self.data.qvel[vel_idx] = 0.0
+            except Exception:
+                pass
+                
+        for j_name, val in initial_pose:
+            act_name = f"act_{j_name.replace('gripper_', '').replace('_joint', '')}"
+            act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
+            if act_id != -1:
+                self.data.ctrl[act_id] = val
+
     def run(self):
         print("\n" + "="*50)
         print("LIVE BC EVALUATION STARTED")
@@ -126,8 +152,12 @@ class BCEvaluator:
                 if self.spawn_requested is not None:
                     obj_id = self.spawn_requested
                     self.spawn_requested = None
-                    print(f"\n---> Spawning object {obj_id}...")
+                    print(f"\n---> Spawning object {obj_id} and resetting gripper...")
                     
+                    # 1. Reset Gripper to canonical starting pinch tripod pose
+                    self.reset_gripper()
+                    
+                    # 2. Spawn requested object and hide others
                     for i in range(1, 4):
                         try:
                             idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
@@ -141,6 +171,13 @@ class BCEvaluator:
                             self.data.qvel[vel_idx:vel_idx+6] = 0.0
                         except Exception:
                             pass
+                            
+                    # Update physics and visual viewer
+                    mujoco.mj_forward(self.model, self.data)
+                    viewer.sync()
+                    
+                    # 10 ms settling delay
+                    time.sleep(0.010)
                             
                 # Handle Target Randomization
                 if self.randomize_target_requested:

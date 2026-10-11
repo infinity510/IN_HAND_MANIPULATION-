@@ -431,3 +431,14 @@ __pycache__/
 *.pyc
 .vscode/
 
+# Machine Learning Checkpoints, Weights & Telemetry
+*.pth
+*.pt
+*.ckpt
+*.onnx
+checkpoints/
+checkpoints_*/
+metrics.jsonl
+*.jsonl
+progress.csv
+!in_hand_manipulation/bc_actor_checkpoint.pth

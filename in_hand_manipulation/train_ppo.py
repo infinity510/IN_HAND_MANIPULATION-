@@ -41,9 +41,10 @@ import math
 import csv
 import json
 import argparse
+import multiprocessing as mp
 from collections import deque
 from dataclasses import dataclass
-from typing import Dict, Tuple, Optional, Generator, List
+from typing import Dict, Tuple, Optional, Generator, List, Callable
 
 import numpy as np
 import scipy.spatial.transform as transform
@@ -51,6 +52,9 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.distributions import Normal
+
+# Limit intra-op threads to 4 to avoid thread-synchronization thrashing on hybrid Intel Core Ultra architectures
+torch.set_num_threads(4)
 
 # Import MuJoCo for the Delto hand simulation
 import mujoco
@@ -69,18 +73,21 @@ class RewardWeights:
     """
     Reward function coefficients according to the user specification:
     r_t = - w1*(d_theta) - w2*||a_t||^2 - w3*||qdot_t||^2
-          + w4*I(d_theta < epsilon) - w5*I(dist_to_palm > 0.12)
+          + w4*I(d_theta < epsilon) - w5*I(dist_to_palm > drop_threshold or obj_z < min_height)
           + w6*n_c - w7*I(n_c == 0)
     """
     w1: float = 1.0     # Angular distance penalty weight: penalizes rotational error d_theta
+    w_progress: float = 2.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
+    w_action_rate: float = 0.002 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
     w4: float = 10.0    # Terminal success bonus: large positive reward upon reaching goal orientation
     w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
     w6: float = 0.05    # Proportional contact reward: encourages multi-fingered contact points (n_c)
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
-    epsilon: float = 0.15           # Target orientation error threshold in radians (~8.6 degrees)
-    drop_threshold: float = 0.12   # Distance threshold from palm center (meters)
+    epsilon: float = 0.35           # Target orientation error threshold in radians (~20.0 degrees)
+    drop_threshold: float = 0.20   # Distance threshold from palm center in meters (spawns at 0.10m, envelope extends to ~0.15m)
+    min_height_threshold: float = 0.02 # Object height floor: true drop below gripper palm level
 
 
 @dataclass
@@ -99,22 +106,28 @@ class PPOConfig:
     
     # Optimization Learning Rates
     actor_lr: float = 2e-5          # Conservative learning rate to preserve BC demonstration gaits
-    critic_lr: float = 3e-4         # Standard learning rate for value function fitting
+    critic_lr: float = 1e-4         # Stabilized learning rate for value function fitting
     max_grad_norm: float = 0.5      # Gradient clipping threshold for stability
     
     # PPO and GAE Mathematics
     gamma: float = 0.99             # Discount factor
     gae_lambda: float = 0.95        # GAE bias-variance trade-off parameter
     clip_eps: float = 0.2           # PPO clipping parameter epsilon (can be 0.1 for tighter updates)
-    target_kl: Optional[float] = 0.02 # Early-stopping threshold on approx_kl (protects BC weights)
+    target_kl: Optional[float] = 0.025 # Early-stopping threshold on epoch-mean approx_kl (protects BC weights)
     value_coef: float = 0.5         # Critic loss weight c1
     entropy_coef: float = 0.001     # Entropy bonus weight c2
-    initial_log_std: float = -2.3   # Explores safely near demonstrated gaits (sigma ~= 0.1 rad)
+    initial_log_std: float = -2.8   # Safe exploration for fine-tuning BC policy (sigma ~= 0.061 rad / 3.5 deg)
     
     # Environment & Dimension Definitions
     obs_dim: int = 39               # 12 qpos + 12 qvel + 3 obj_pos + 4 obj_quat + 4 target_quat + 4 phys_params
     act_dim: int = 12               # 12 actuated continuous joints of Delto hand
+    num_envs: int = 8               # Parallel environment workers for multi-core speedup (16-core CPU default: 8)
     max_episode_steps: int = 250    # Max steps per episode before time-limit truncation
+    epsilon: float = 0.35           # Goal orientation tolerance in radians (~20.0 degrees)
+    curriculum_epsilon: bool = False # If True, adaptively tightens epsilon when proficiency is high (> 15% success)
+    min_epsilon: float = 0.20        # Minimum curriculum threshold in radians (~11.5 degrees)
+    w_progress: float = 2.0          # Angular progress reward weight
+    w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
     dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
@@ -194,9 +207,18 @@ class DeltoInHandManipulationEnv:
         self.active_object_id = 1
         self.target_quat = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)  # [w, x, y, z]
         self.step_count = 0
+        self.episode_successes = 0
+        self.prev_d_theta = 0.0
+        self.prev_action = np.zeros(len(self.actuator_ids), dtype=np.float32)
         
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
         self.palm_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+
+    def _sample_target_quat(self) -> np.ndarray:
+        """Samples a new random 3D target quaternion [w, x, y, z] in SO(3)."""
+        rand_rot = transform.Rotation.random()
+        q_xyzw = rand_rot.as_quat()  # Scipy is [x, y, z, w]
+        return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
 
     def _get_gripper_joint_names(self) -> List[str]:
         names = []
@@ -242,6 +264,7 @@ class DeltoInHandManipulationEnv:
     def reset(self, object_id: Optional[int] = None) -> Tuple[np.ndarray, Dict]:
         """Resets the environment, sets random target orientation, and returns initial state."""
         self.step_count = 0
+        self.episode_successes = 0
         mujoco.mj_resetData(self.model, self.data)
         
         # 1. Reset Gripper Joints
@@ -302,14 +325,18 @@ class DeltoInHandManipulationEnv:
             self.data.qvel[vel_idx:vel_idx+6] = 0.0
             
         # 5. Generate Random Target Goal Orientation (Quat [w, x, y, z])
-        rand_rot = transform.Rotation.random()
-        q_xyzw = rand_rot.as_quat()  # Scipy is [x, y, z, w]
-        self.target_quat = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
+        self.target_quat = self._sample_target_quat()
         
         # Forward kinematics & step physics briefly to let contacts settle
         mujoco.mj_forward(self.model, self.data)
         for _ in range(15):
             mujoco.mj_step(self.model, self.data)
+            
+        # Initialize angular distance and previous action for differential reward terms
+        obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object_id}_joint").id]
+        cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
+        self.prev_d_theta = self.compute_angular_distance(cur_obj_quat, self.target_quat)
+        self.prev_action = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
             
         obs = self._get_observation()
         info = {
@@ -400,11 +427,22 @@ class DeltoInHandManipulationEnv:
         r_qvel = np.array([self.data.qvel[self.model.jnt_dofadr[self.model.joint(j).id]] for j in self.joint_names])
         
         # 4. Compute Metrics for Reward Function
+        w = self.reward_weights
+        
         # (a) Geodesic Angular Distance: d_theta
         d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
         
+        # (a2) Angular Progress Reward (Velocity toward goal: positive when rotating closer)
+        angular_progress = float(self.prev_d_theta - d_theta)
+        progress_reward = w.w_progress * angular_progress
+        
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
+        
+        # (b2) Action Rate Smoothing Penalty: ||a_t - a_{t-1}||^2 (penalizes high-frequency finger tremor)
+        action_diff_sq = float(np.sum(np.square(action - self.prev_action)))
+        action_rate_penalty = w.w_action_rate * action_diff_sq
+        self.prev_action = action.copy()
         
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
@@ -415,37 +453,31 @@ class DeltoInHandManipulationEnv:
         # (e) Contact points
         n_c = self.count_contacts()
         
-        # 5. Evaluate Indicator Functions & Terminations
-        w = self.reward_weights
-        is_success = bool(d_theta < w.epsilon)
-        is_dropped = bool(dist_to_palm > w.drop_threshold)
+        # 5. Evaluate Indicator Functions & Continuous Goal Resampling
+        is_success_this_step = bool(d_theta < w.epsilon)
+        is_dropped = bool(dist_to_palm > w.drop_threshold or obj_pos[2] < w.min_height_threshold)
         
-        term_success_bonus = w.w4 if is_success else 0.0
+        term_success_bonus = 0.0
+        if is_success_this_step:
+            self.episode_successes += 1
+            term_success_bonus = w.w4  # Success bonus (+10.0)
+            # Continuous Goal Resampling (OpenAI Dactyl standard):
+            # When target orientation is reached, immediately sample a new target orientation
+            # so the agent can score multiple successive goals per episode without being penalized by early termination!
+            self.target_quat = self._sample_target_quat()
+            # Reset prev_d_theta against new goal so progress is accurately tracked for next step
+            self.prev_d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
+        else:
+            self.prev_d_theta = d_theta
+            
         drop_penalty = w.w5 if is_dropped else 0.0
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         
-        # =====================================================================
-        # EXACT REWARD FORMULATION (with Survival Baseline):
-        # r_t = w1 * (pi - d_theta)
-        #       - w2 * ||a_t||^2
-        #       - w3 * ||qdot_t||^2
-        #       + w4 * I(d_theta < epsilon)
-        #       - w5 * I(dist_to_palm > 0.12)
-        #       + w6 * n_c
-        #       - w7 * I(n_c == 0)
-        #
-        # Anti-Suicide Transformation:
-        # Formulating the angular term as w1 * (pi - d_theta) >= 0 is mathematically
-        # equivalent to: - w1 * d_theta + w1 * pi.
-        # The constant w1 * pi (+3.1416) acts as a per-step "alive bonus".
-        # While holding the cube, the agent earns positive return at every step.
-        # Dropping the cube immediately terminates the episode and forfeits all
-        # remaining positive rewards for the episode horizon, eliminating the
-        # failure mode where the policy learns to drop the object early.
-        # =====================================================================
         reward = (
             (w.w1 * (np.pi - d_theta))
+            + progress_reward
             - (w.w2 * control_norm_sq)
+            - action_rate_penalty
             - (w.w3 * vel_norm_sq)
             + term_success_bonus
             - drop_penalty
@@ -454,8 +486,9 @@ class DeltoInHandManipulationEnv:
         )
         
         # 6. Termination Flags
-        # Dropping the object or achieving orientation threshold terminates episode
-        terminated = is_dropped or is_success
+        # Only dropping the object causes absorbing early termination.
+        # Achieving target orientation rewards the agent and continues manipulating toward a new goal!
+        terminated = is_dropped
         truncated = (self.step_count >= self.max_episode_steps)
         
         next_obs = self._get_observation()
@@ -463,11 +496,14 @@ class DeltoInHandManipulationEnv:
             "d_theta": d_theta,
             "dist_to_palm": dist_to_palm,
             "contacts": n_c,
-            "is_success": is_success,
+            "is_success": (self.episode_successes > 0),
+            "successes_in_episode": self.episode_successes,
             "is_dropped": is_dropped,
             "reward_components": {
                 "angular_reward": (w.w1 * (np.pi - d_theta)),
+                "progress_reward": progress_reward,
                 "control_penalty": - (w.w2 * control_norm_sq),
+                "action_rate_penalty": - action_rate_penalty,
                 "velocity_penalty": - (w.w3 * vel_norm_sq),
                 "success_bonus": term_success_bonus,
                 "drop_penalty": - drop_penalty,
@@ -489,6 +525,136 @@ class DeltoInHandManipulationEnv:
             except Exception:
                 pass
             self.viewer = None
+
+
+# =============================================================================
+# 1.1 VECTORIZED ENVIRONMENT WRAPPERS (MULTI-CORE PARALLEL ACCELERATION)
+# =============================================================================
+
+class DummyVecEnv:
+    """Single-process vectorized wrapper for debugging and interactive 3D rendering."""
+    def __init__(self, env_fns: List[Callable[[], DeltoInHandManipulationEnv]]):
+        self.envs = [fn() for fn in env_fns]
+        self.num_envs = len(self.envs)
+
+    def reset(self) -> np.ndarray:
+        obs_list = []
+        for env in self.envs:
+            obs, _ = env.reset()
+            obs_list.append(obs)
+        return np.array(obs_list, dtype=np.float32)
+
+    def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Dict]]:
+        obs_list, reward_list, term_list, trunc_list, info_list = [], [], [], [], []
+        for env, act in zip(self.envs, actions):
+            next_obs, reward, term, trunc, info = env.step(act)
+            if term or trunc:
+                info["terminal_observation"] = next_obs.copy()
+                next_obs, _ = env.reset()
+            obs_list.append(next_obs)
+            reward_list.append(reward)
+            term_list.append(term)
+            trunc_list.append(trunc)
+            info_list.append(info)
+        return (
+            np.array(obs_list, dtype=np.float32),
+            np.array(reward_list, dtype=np.float32),
+            np.array(term_list, dtype=bool),
+            np.array(trunc_list, dtype=bool),
+            info_list,
+        )
+
+    def set_epsilon(self, epsilon: float):
+        for env in self.envs:
+            env.reward_weights.epsilon = float(epsilon)
+
+    def close(self):
+        for env in self.envs:
+            env.close()
+
+
+class SubprocVecEnv:
+    """
+    Multi-process asynchronous vectorized environment.
+    Runs each MuJoCo simulation instance in an isolated worker process via pipes.
+    Enables 10x-15x wall-clock speedups across multi-core CPUs.
+    """
+    def __init__(self, env_fns: List[Callable[[], DeltoInHandManipulationEnv]]):
+        self.num_envs = len(env_fns)
+        ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
+        self.pipes = []
+        self.procs = []
+        for fn in env_fns:
+            p_parent, p_child = ctx.Pipe()
+            p = ctx.Process(target=self._worker, args=(p_child, fn))
+            p.daemon = True
+            p.start()
+            p_child.close()
+            self.pipes.append(p_parent)
+            self.procs.append(p)
+            
+        # Collect initial observations emitted upon worker startup
+        self._init_obs = [p.recv() for p in self.pipes]
+
+    @staticmethod
+    def _worker(pipe, env_fn):
+        env = env_fn()
+        obs, info = env.reset()
+        pipe.send(obs)
+        while True:
+            cmd, data = pipe.recv()
+            if cmd == "step":
+                next_obs, r, term, trunc, info = env.step(data)
+                if term or trunc:
+                    info["terminal_observation"] = next_obs.copy()
+                    next_obs, _ = env.reset()
+                pipe.send((next_obs, r, term, trunc, info))
+            elif cmd == "reset":
+                obs, info = env.reset()
+                pipe.send((obs, info))
+            elif cmd == "set_epsilon":
+                env.reward_weights.epsilon = float(data)
+                pipe.send(True)
+            elif cmd == "close":
+                env.close()
+                pipe.close()
+                break
+
+    def reset(self) -> np.ndarray:
+        if self._init_obs is not None:
+            obs = np.array(self._init_obs, dtype=np.float32)
+            self._init_obs = None
+            return obs
+        for p in self.pipes:
+            p.send(("reset", None))
+        results = [p.recv() for p in self.pipes]
+        return np.array([r[0] for r in results], dtype=np.float32)
+
+    def step(self, actions: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[Dict]]:
+        for p, a in zip(self.pipes, actions):
+            p.send(("step", a))
+        results = [p.recv() for p in self.pipes]
+        obs = np.array([r[0] for r in results], dtype=np.float32)
+        rewards = np.array([r[1] for r in results], dtype=np.float32)
+        terms = np.array([r[2] for r in results], dtype=bool)
+        truncs = np.array([r[3] for r in results], dtype=bool)
+        infos = [r[4] for r in results]
+        return obs, rewards, terms, truncs, infos
+
+    def set_epsilon(self, epsilon: float):
+        for p in self.pipes:
+            p.send(("set_epsilon", float(epsilon)))
+        for p in self.pipes:
+            p.recv()
+
+    def close(self):
+        for p in self.pipes:
+            try:
+                p.send(("close", None))
+            except Exception:
+                pass
+        for p in self.procs:
+            p.join(timeout=1.0)
 
 
 # =============================================================================
@@ -635,26 +801,32 @@ class CriticNetwork(nn.Module):
 
 class RolloutBuffer:
     """
-    Synchronous Trajectory Rollout Buffer.
-    Stores T steps of transitions, calculates Generalized Advantage Estimation (GAE),
-    and yields shuffled minibatches for PPO updates.
+    Trajectory Rollout Buffer supporting both single and multi-core vectorized environments.
+    Stores T steps across N environments, calculates Generalized Advantage Estimation (GAE),
+    and yields shuffled minibatches across flattened transitions for PPO updates.
     """
-    def __init__(self, buffer_size: int, obs_dim: int, act_dim: int, device: torch.device):
+    def __init__(self, buffer_size: int, num_envs: int, obs_dim: int, act_dim: int, device: torch.device):
         self.buffer_size = buffer_size
+        self.num_envs = num_envs
+        self.steps_per_env = buffer_size // num_envs
+        self.total_size = self.steps_per_env * num_envs
         self.obs_dim = obs_dim
         self.act_dim = act_dim
         self.device = device
         
-        # Pre-allocated tensors
-        self.obs = torch.zeros((buffer_size, obs_dim), dtype=torch.float32, device=device)
-        self.actions = torch.zeros((buffer_size, act_dim), dtype=torch.float32, device=device)
-        self.log_probs = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.rewards = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.values = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.dones = torch.zeros(buffer_size, dtype=torch.float32, device=device)
+        # Pre-allocated 2D grid tensors (steps_per_env, num_envs, ...)
+        self.obs = torch.zeros((self.steps_per_env, num_envs, obs_dim), dtype=torch.float32, device=device)
+        self.actions = torch.zeros((self.steps_per_env, num_envs, act_dim), dtype=torch.float32, device=device)
+        self.log_probs = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.rewards = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.values = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.dones = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.terminateds = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.truncateds = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.truncated_values = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
         
-        self.advantages = torch.zeros(buffer_size, dtype=torch.float32, device=device)
-        self.returns = torch.zeros(buffer_size, dtype=torch.float32, device=device)
+        self.advantages = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
+        self.returns = torch.zeros((self.steps_per_env, num_envs), dtype=torch.float32, device=device)
         
         self.step_idx = 0
         self.is_full = False
@@ -664,49 +836,52 @@ class RolloutBuffer:
         obs: np.ndarray,
         action: torch.Tensor,
         log_prob: torch.Tensor,
-        reward: float,
+        reward: np.ndarray,
         value: torch.Tensor,
-        done: bool,
+        done: np.ndarray,
+        terminated: np.ndarray,
+        truncated: np.ndarray,
+        truncated_value: torch.Tensor,
     ):
-        """Inserts one transition into the buffer."""
-        assert self.step_idx < self.buffer_size, "Buffer overflow!"
+        """Inserts one parallel time-step across all environments into the buffer."""
+        t = self.step_idx
+        assert t < self.steps_per_env, "Buffer overflow!"
         
-        self.obs[self.step_idx] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
-        self.actions[self.step_idx] = action
-        self.log_probs[self.step_idx] = log_prob
-        self.rewards[self.step_idx] = float(reward)
-        self.values[self.step_idx] = value
-        self.dones[self.step_idx] = float(done)
+        self.obs[t] = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        self.actions[t] = torch.as_tensor(action, dtype=torch.float32, device=self.device)
+        self.log_probs[t] = torch.as_tensor(log_prob, dtype=torch.float32, device=self.device)
+        self.rewards[t] = torch.as_tensor(reward, dtype=torch.float32, device=self.device)
+        self.values[t] = torch.as_tensor(value, dtype=torch.float32, device=self.device)
+        self.dones[t] = torch.as_tensor(done, dtype=torch.float32, device=self.device)
+        self.terminateds[t] = torch.as_tensor(terminated, dtype=torch.float32, device=self.device)
+        self.truncateds[t] = torch.as_tensor(truncated, dtype=torch.float32, device=self.device)
+        self.truncated_values[t] = torch.as_tensor(truncated_value, dtype=torch.float32, device=self.device)
         
         self.step_idx += 1
-        if self.step_idx == self.buffer_size:
+        if self.step_idx == self.steps_per_env:
             self.is_full = True
 
-    def compute_gae(self, last_value: torch.Tensor, gamma: float = 0.99, gae_lambda: float = 0.95):
+    def compute_gae(self, last_values: torch.Tensor, gamma: float = 0.99, gae_lambda: float = 0.95):
         """
-        Computes Generalized Advantage Estimation (GAE):
-          delta_t = r_t + gamma * V(s_{t+1}) * (1 - d_t) - V(s_t)
-          A_hat_t = sum_{l=0}^{T-t-1} (gamma * lambda)^l * delta_{t+l}
-                  = delta_t + gamma * lambda * (1 - d_t) * A_hat_{t+1}
-          Target Return R_t = A_hat_t + V(s_t)
+        Computes Generalized Advantage Estimation (GAE) across all parallel environments:
+        - Terminated episodes (drop or goal achieved) have value 0 for absorbing end state.
+        - Truncated episodes (time limit reached) bootstrap next-state continuation value V(s_next).
+        - Advantages never leak across episode resets (1 - dones[t]).
         """
-        last_gae_lam = 0.0
-        for t in reversed(range(self.buffer_size)):
-            if t == self.buffer_size - 1:
+        last_gae_lam = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
+        for t in reversed(range(self.steps_per_env)):
+            if t == self.steps_per_env - 1:
                 next_non_terminal = 1.0 - self.dones[t]
-                next_value = last_value
+                next_value = last_values
             else:
                 next_non_terminal = 1.0 - self.dones[t]
-                next_value = self.values[t + 1]
+                next_value = torch.where(self.truncateds[t] > 0.5, self.truncated_values[t], self.values[t + 1])
                 
-            # 1-step Temporal Difference error: delta_t
-            delta = self.rewards[t] + gamma * next_value * next_non_terminal - self.values[t]
-            
-            # Recursive backward GAE calculation
-            last_gae_lam = delta + gamma * gae_lambda * next_non_terminal * last_gae_lam
+            next_cont = torch.where(self.terminateds[t] > 0.5, 0.0, 1.0)
+            delta = self.rewards[t] + (gamma * next_value * next_cont) - self.values[t]
+            last_gae_lam = delta + (gamma * gae_lambda * next_non_terminal * last_gae_lam)
             self.advantages[t] = last_gae_lam
             
-        # Target returns for the Critic: R_t = A_hat_t + V(s_t)
         self.returns = self.advantages + self.values
 
     def get_minibatch_generator(
@@ -715,30 +890,34 @@ class RolloutBuffer:
         normalize_advantages: bool = True
     ) -> Generator[Dict[str, torch.Tensor], None, None]:
         """
-        Yields random minibatches for PPO updates.
-        Optionally normalizes advantages across the entire rollout buffer before batching.
+        Flattens (steps_per_env, num_envs, ...) into (total_size, ...) and yields random minibatches for PPO updates.
         """
-        indices = np.arange(self.buffer_size)
+        b_obs = self.obs.reshape(-1, self.obs_dim)
+        b_actions = self.actions.reshape(-1, self.act_dim)
+        b_log_probs = self.log_probs.reshape(-1)
+        b_advantages = self.advantages.reshape(-1)
+        b_returns = self.returns.reshape(-1)
+        b_values = self.values.reshape(-1)
+        
+        if normalize_advantages:
+            adv_mean = b_advantages.mean()
+            adv_std = b_advantages.std() + 1e-8
+            norm_advantages = (b_advantages - adv_mean) / adv_std
+        else:
+            norm_advantages = b_advantages
+            
+        indices = np.arange(self.total_size)
         np.random.shuffle(indices)
         
-        # Advantage normalization across entire rollout buffer: (A - mean) / (std + 1e-8)
-        advs = self.advantages
-        if normalize_advantages:
-            adv_mean = advs.mean()
-            adv_std = advs.std() + 1e-8
-            norm_advantages = (advs - adv_mean) / adv_std
-        else:
-            norm_advantages = advs
-            
-        for start_idx in range(0, self.buffer_size, batch_size):
+        for start_idx in range(0, self.total_size, batch_size):
             batch_idx = indices[start_idx : start_idx + batch_size]
             yield {
-                "obs": self.obs[batch_idx],
-                "actions": self.actions[batch_idx],
-                "old_log_probs": self.log_probs[batch_idx],
+                "obs": b_obs[batch_idx],
+                "actions": b_actions[batch_idx],
+                "old_log_probs": b_log_probs[batch_idx],
                 "advantages": norm_advantages[batch_idx],
-                "returns": self.returns[batch_idx],
-                "old_values": self.values[batch_idx],
+                "returns": b_returns[batch_idx],
+                "old_values": b_values[batch_idx],
             }
 
     def clear(self):
@@ -808,28 +987,41 @@ class PPOFineTuner:
         # 4. Instantiate Rollout Buffer
         self.buffer = RolloutBuffer(
             buffer_size=self.cfg.rollout_steps,
+            num_envs=self.cfg.num_envs,
             obs_dim=self.cfg.obs_dim,
             act_dim=self.cfg.act_dim,
             device=self.device
         )
         
-        # 5. Instantiate MuJoCo Environment
-        self.env = DeltoInHandManipulationEnv(
-            scene_xml_path=self.scene_xml_path,
-            obs_mean=self.obs_mean,
-            obs_std=self.obs_std,
-            max_episode_steps=self.cfg.max_episode_steps,
-            render_mode=self.cfg.render,
-            dr_ratio=self.cfg.dr_ratio
-        )
-        
+        # 5. Instantiate MuJoCo Environment (Single-Process or Multi-Core Vectorized)
+        def make_env_fn():
+            return DeltoInHandManipulationEnv(
+                scene_xml_path=self.scene_xml_path,
+                obs_mean=self.obs_mean,
+                obs_std=self.obs_std,
+                reward_weights=RewardWeights(
+                    epsilon=self.cfg.epsilon,
+                    w_progress=self.cfg.w_progress,
+                    w_action_rate=self.cfg.w_action_rate,
+                ),
+                max_episode_steps=self.cfg.max_episode_steps,
+                render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
+                dr_ratio=self.cfg.dr_ratio
+            )
+            
+        if self.cfg.num_envs == 1:
+            self.vec_env = DummyVecEnv([make_env_fn])
+        else:
+            print(f"[PPOFineTuner] Spawning {self.cfg.num_envs} parallel MuJoCo worker processes...")
+            self.vec_env = SubprocVecEnv([make_env_fn for _ in range(self.cfg.num_envs)])
+            
         # 6. Persistent Telemetry Queues across rollout boundaries
         self.recent_returns = deque(maxlen=50)
         self.recent_lengths = deque(maxlen=50)
         self.recent_successes = deque(maxlen=50)
         self.recent_drops = deque(maxlen=50)
-        self.current_ep_reward = 0.0
-        self.current_ep_len = 0
+        self.ep_returns = np.zeros(self.cfg.num_envs, dtype=np.float32)
+        self.ep_lengths = np.zeros(self.cfg.num_envs, dtype=np.int32)
 
     def _load_bc_checkpoint(self) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -841,21 +1033,28 @@ class PPOFineTuner:
                 "Please run `train_bc.py` first to generate pre-trained weights."
             )
             
-        print(f"[PPOFineTuner] Loading BC weights from {self.checkpoint_path}...")
+        print(f"[PPOFineTuner] Loading weights from {self.checkpoint_path}...")
         checkpoint = torch.load(self.checkpoint_path, map_location=self.device, weights_only=False)
         
-        # Load state dictionary into Actor's net and mu_head
-        actor_state = checkpoint["model_state_dict"]
-        # Filter for layers matching Actor
+        # Check if loading BC pretraining ('model_state_dict') or resuming PPO run ('actor_state_dict')
+        actor_state = checkpoint.get("actor_state_dict", checkpoint.get("model_state_dict"))
+        if actor_state is None:
+            raise KeyError(f"Could not find actor weights in checkpoint at {self.checkpoint_path}!")
         self.actor.load_state_dict(actor_state, strict=False)
         
-        # Strictly enforce initial exploration standard deviation parameter
-        # log_std = -2.3 corresponds to sigma ~= 0.1 rad, safe for Delto hand exploration
-        with torch.no_grad():
-            self.actor.log_std.fill_(self.cfg.initial_log_std)
+        # If resuming from a prior PPO checkpoint with Critic weights
+        if "critic_state_dict" in checkpoint:
+            self.critic.load_state_dict(checkpoint["critic_state_dict"], strict=False)
+            print("[PPOFineTuner] Critic weights successfully resumed from PPO checkpoint.")
+            if "log_std" in checkpoint:
+                with torch.no_grad():
+                    self.actor.log_std.copy_(torch.as_tensor(checkpoint["log_std"], device=self.device))
+        else:
+            with torch.no_grad():
+                self.actor.log_std.fill_(self.cfg.initial_log_std)
             
         print(f"[PPOFineTuner] Actor weights loaded successfully.")
-        print(f"[PPOFineTuner] Actor log_std manually initialized to: {self.actor.log_std.data.cpu().numpy()[0]:.2f} "
+        print(f"[PPOFineTuner] Actor log_std set to: {self.actor.log_std.data.cpu().numpy()[0]:.2f} "
               f"(sigma ~= {self.actor.log_std.exp().data.cpu().numpy()[0]:.4f} rad)")
         
         obs_mean = checkpoint.get("obs_mean", np.zeros(self.cfg.obs_dim, dtype=np.float32)).copy()
@@ -875,7 +1074,7 @@ class PPOFineTuner:
 
     def collect_rollouts(self, current_obs: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
         """
-        Executes policy in MuJoCo for rollout_steps to fill the trajectory buffer.
+        Executes policy across num_envs parallel environments to fill the trajectory buffer.
         """
         self.buffer.clear()
         # Set actor to eval mode during rollout to disable dropout
@@ -883,66 +1082,78 @@ class PPOFineTuner:
         self.critic.eval()
         
         total_rollout_reward = 0.0
+        steps_per_env = self.buffer.steps_per_env
         
-        for step in range(self.cfg.rollout_steps):
-            obs_tensor = torch.as_tensor(current_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        for step in range(steps_per_env):
+            obs_tensor = torch.as_tensor(current_obs, dtype=torch.float32, device=self.device)
             
             with torch.no_grad():
                 action, log_prob, _ = self.actor.act(obs_tensor)
                 value = self.critic(obs_tensor)
                 
-            action_np = action.squeeze(0).cpu().numpy()
+            action_np = action.cpu().numpy()
             
             # Print sample action telemetry if requested
-            if self.cfg.show_actions and (step % 256 == 0):
-                print(f"  [Rollout Step {step:04d}] Action norm: {np.linalg.norm(action_np):.3f} | Mean: {action_np.mean():+.3f} | Min/Max: [{action_np.min():+.2f}, {action_np.max():+.2f}]")
-                print(f"    Joint Targets: {np.round(action_np, 2)}")
+            if self.cfg.show_actions and (step % 128 == 0):
+                print(f"  [Rollout Step {step:04d}] Action norm: {np.linalg.norm(action_np[0]):.3f} | Mean: {action_np[0].mean():+.3f} | Min/Max: [{action_np[0].min():+.2f}, {action_np[0].max():+.2f}]")
+                print(f"    Joint Targets (env 0): {np.round(action_np[0], 2)}")
             
-            # Step environment
-            next_obs, reward, terminated, truncated, info = self.env.step(action_np)
-            done = terminated or truncated
+            # Step parallel environments
+            next_obs, rewards, terminateds, truncateds, infos = self.vec_env.step(action_np)
+            dones = terminateds | truncateds
+            total_rollout_reward += float(np.sum(rewards))
             
-            # Optional pacing for human-observable visual playback if rendering is enabled
-            if self.cfg.render:
+            # Optional pacing for human-observable visual playback if rendering in single-env mode
+            if self.cfg.render and self.cfg.num_envs == 1:
                 time.sleep(0.015)
+            
+            # If truncated (time-limit reached while still manipulating), bootstrap continuation values
+            trunc_values = torch.zeros(self.cfg.num_envs, dtype=torch.float32, device=self.device)
+            for env_idx in range(self.cfg.num_envs):
+                self.ep_returns[env_idx] += float(rewards[env_idx])
+                self.ep_lengths[env_idx] += 1
+                
+                if truncateds[env_idx] and not terminateds[env_idx]:
+                    term_obs = infos[env_idx].get("terminal_observation", next_obs[env_idx])
+                    term_tensor = torch.as_tensor(term_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    with torch.no_grad():
+                        trunc_values[env_idx] = self.critic(term_tensor).squeeze(0)
+                        
+                if dones[env_idx]:
+                    self.recent_returns.append(float(self.ep_returns[env_idx]))
+                    self.recent_lengths.append(int(self.ep_lengths[env_idx]))
+                    self.recent_successes.append(1.0 if infos[env_idx].get("is_success", False) else 0.0)
+                    self.recent_drops.append(1.0 if infos[env_idx].get("is_dropped", False) else 0.0)
+                    self.ep_returns[env_idx] = 0.0
+                    self.ep_lengths[env_idx] = 0
             
             # Insert into rollout buffer
             self.buffer.insert(
                 obs=current_obs,
-                action=action.squeeze(0),
-                log_prob=log_prob.squeeze(0),
-                reward=reward,
-                value=value.squeeze(0),
-                done=done
+                action=action,
+                log_prob=log_prob,
+                reward=rewards,
+                value=value,
+                done=dones,
+                terminated=terminateds,
+                truncated=truncateds,
+                truncated_value=trunc_values
             )
             
             current_obs = next_obs
-            total_rollout_reward += reward
-            self.current_ep_reward += reward
-            self.current_ep_len += 1
             
-            if done:
-                self.recent_returns.append(self.current_ep_reward)
-                self.recent_lengths.append(self.current_ep_len)
-                self.recent_successes.append(1.0 if info.get("is_success", False) else 0.0)
-                self.recent_drops.append(1.0 if info.get("is_dropped", False) else 0.0)
-                
-                self.current_ep_reward = 0.0
-                self.current_ep_len = 0
-                current_obs, _ = self.env.reset()
-                
-        # Value of final state for GAE truncation handling: V(s_{T})
-        final_obs_tensor = torch.as_tensor(current_obs, dtype=torch.float32, device=self.device).unsqueeze(0)
+        # Bootstrap last values across all environments for GAE
+        last_obs_tensor = torch.as_tensor(current_obs, dtype=torch.float32, device=self.device)
         with torch.no_grad():
-            last_value = self.critic(final_obs_tensor).squeeze(0)
+            last_values = self.critic(last_obs_tensor)
             
-        self.buffer.compute_gae(last_value=last_value, gamma=self.cfg.gamma, gae_lambda=self.cfg.gae_lambda)
+        self.buffer.compute_gae(last_values=last_values, gamma=self.cfg.gamma, gae_lambda=self.cfg.gae_lambda)
         
-        step_reward = total_rollout_reward / float(self.cfg.rollout_steps)
+        step_reward = total_rollout_reward / float(self.buffer.total_size)
         metrics = {
             "step_reward": step_reward,
             "ep_return": float(np.mean(self.recent_returns)) if self.recent_returns else (step_reward * self.cfg.max_episode_steps),
-            "ep_length": float(np.mean(self.recent_lengths)) if self.recent_lengths else float(self.current_ep_len),
+            "ep_length": float(np.mean(self.recent_lengths)) if self.recent_lengths else float(np.mean(self.ep_lengths)),
             "success_rate": float(np.mean(self.recent_successes)) if self.recent_successes else 0.0,
             "drop_rate": float(np.mean(self.recent_drops)) if self.recent_drops else 0.0,
         }
@@ -972,19 +1183,28 @@ class PPOFineTuner:
             if kl_early_stopped:
                 break
             epochs_completed += 1
+            epoch_kls = []
+            
             for batch in self.buffer.get_minibatch_generator(batch_size=self.cfg.mini_batch_size, normalize_advantages=True):
                 b_obs = batch["obs"]
                 b_actions = batch["actions"]
                 b_old_log_probs = batch["old_log_probs"]
                 b_advantages = batch["advantages"]
                 b_returns = batch["returns"]
+                b_old_values = batch["old_values"]
                 
                 # -------------------------------------------------------------
-                # 1. CRITIC VALUE UPDATE
+                # 1. CRITIC VALUE UPDATE (with PPO Value Loss Clipping)
                 # -------------------------------------------------------------
                 values = self.critic(b_obs)
-                # Value Loss: L_critic = 0.5 * MSE(V(s), Return)
-                critic_loss = 0.5 * nn.functional.mse_loss(values, b_returns)
+                v_loss_unclipped = 0.5 * ((values - b_returns) ** 2)
+                v_clipped = b_old_values + torch.clamp(
+                    values - b_old_values,
+                    -self.cfg.clip_eps * 10.0,
+                    self.cfg.clip_eps * 10.0
+                )
+                v_loss_clipped = 0.5 * ((v_clipped - b_returns) ** 2)
+                critic_loss = torch.max(v_loss_unclipped, v_loss_clipped).mean()
                 
                 self.critic_optimizer.zero_grad()
                 critic_loss.backward()
@@ -1011,16 +1231,12 @@ class PPOFineTuner:
                 # Approximate KL Divergence for monitoring policy stability: (r - 1) - log(r)
                 with torch.no_grad():
                     approx_kl = ((ratio - 1.0) - log_ratio).mean().item()
+                    epoch_kls.append(approx_kl)
                     approx_kls.append(approx_kl)
                     
                     # Track clipping frequency
                     clipped = (ratio < (1.0 - self.cfg.clip_eps)) | (ratio > (1.0 + self.cfg.clip_eps))
                     clip_fractions.append(clipped.float().mean().item())
-                
-                # Target KL early stopping: prevents destructive policy drift beyond trust region
-                if self.cfg.target_kl is not None and approx_kl > (1.5 * self.cfg.target_kl):
-                    kl_early_stopped = True
-                    break
                 
                 # Clipped Surrogate Objective:
                 # Surr1 = r_t(theta) * A_t
@@ -1043,6 +1259,13 @@ class PPOFineTuner:
                 
                 actor_losses.append(actor_loss.item())
                 entropies.append(mean_entropy.item())
+
+            # Target KL early stopping evaluated at EPOCH level across all minibatches
+            if not is_warmup and self.cfg.target_kl is not None and epoch_kls:
+                mean_epoch_kl = float(np.mean(epoch_kls))
+                if mean_epoch_kl > (1.5 * self.cfg.target_kl):
+                    kl_early_stopped = True
+                    break
                 
         return {
             "loss_critic": float(np.mean(critic_losses)) if critic_losses else 0.0,
@@ -1067,63 +1290,89 @@ class PPOFineTuner:
         print(f"Logging progress to: {os.path.join(output_dir, 'progress.csv')}")
         print("="*75 + "\n")
         
-        obs, _ = self.env.reset()
-        best_success_rate = -1.0
+        obs = self.vec_env.reset()
+        best_success_rate = 0.0
+        best_ep_return = -float('inf')
         start_time = time.time()
         
-        for iteration in range(1, self.cfg.num_iterations + 1):
-            iter_start = time.time()
-            is_warmup = (iteration <= self.cfg.warmup_iterations)
-            
-            # Phase A: Trajectory Rollout Collection
-            obs, rollout_metrics = self.collect_rollouts(obs)
-            
-            # Phase B: PPO Policy & Value Updates
-            update_metrics = self.update_policy(is_warmup=is_warmup)
-            
-            elapsed = time.time() - iter_start
-            phase_tag = "[CRITIC WARM-UP]" if is_warmup else "[JOINT PPO]"
-            
-            # Telemetry Metrics Record
-            log_record = {
-                "iteration": iteration,
-                "ep_return": rollout_metrics["ep_return"],
-                "step_reward": rollout_metrics["step_reward"],
-                "ep_length": rollout_metrics["ep_length"],
-                "success_rate": rollout_metrics["success_rate"],
-                "drop_rate": rollout_metrics["drop_rate"],
-                "loss_critic": update_metrics["loss_critic"],
-                "loss_actor": update_metrics["loss_actor"],
-                "entropy": update_metrics["entropy"],
-                "clip_fraction": update_metrics["clip_fraction"],
-                "approx_kl": update_metrics["approx_kl"],
-                "log_std": float(self.actor.log_std.data.mean().item()),
-                "elapsed_sec": elapsed,
-            }
-            logger.log(log_record)
-            
-            # Console Output
-            kl_flag = " (KL stopped)" if update_metrics.get("kl_early_stopped", False) else ""
-            print(
-                f"Iter {iteration:03d}/{self.cfg.num_iterations:03d} {phase_tag:<18} | "
-                f"EpRet: {rollout_metrics['ep_return']:7.1f} | "
-                f"StepR: {rollout_metrics['step_reward']:6.2f} | "
-                f"Succ: {rollout_metrics['success_rate']*100:5.1f}% | "
-                f"Drop: {rollout_metrics['drop_rate']*100:5.1f}% | "
-                f"CritLoss: {update_metrics['loss_critic']:6.4f} | "
-                f"ActLoss: {update_metrics['loss_actor']:6.4f} | "
-                f"KL: {update_metrics['approx_kl']:.4f}{kl_flag} | "
-                f"Time: {elapsed:4.1f}s"
-            )
-            
-            # Model Checkpointing
-            if not is_warmup and rollout_metrics["success_rate"] > best_success_rate:
-                best_success_rate = rollout_metrics["success_rate"]
-                self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
+        try:
+            for iteration in range(1, self.cfg.num_iterations + 1):
+                iter_start = time.time()
+                is_warmup = (iteration <= self.cfg.warmup_iterations)
                 
-            if iteration % 25 == 0 or iteration == self.cfg.num_iterations:
-                self.save_checkpoint(os.path.join(output_dir, f"ppo_checkpoint_iter_{iteration}.pth"), iteration, rollout_metrics)
+                # Phase A: Trajectory Rollout Collection
+                obs, rollout_metrics = self.collect_rollouts(obs)
                 
+                # Phase B: PPO Policy & Value Updates
+                update_metrics = self.update_policy(is_warmup=is_warmup)
+                
+                elapsed = time.time() - iter_start
+                phase_tag = "[CRITIC WARM-UP]" if is_warmup else "[JOINT PPO]"
+                
+                # Telemetry Metrics Record
+                log_record = {
+                    "iteration": iteration,
+                    "ep_return": rollout_metrics["ep_return"],
+                    "step_reward": rollout_metrics["step_reward"],
+                    "ep_length": rollout_metrics["ep_length"],
+                    "success_rate": rollout_metrics["success_rate"],
+                    "drop_rate": rollout_metrics["drop_rate"],
+                    "loss_critic": update_metrics["loss_critic"],
+                    "loss_actor": update_metrics["loss_actor"],
+                    "entropy": update_metrics["entropy"],
+                    "clip_fraction": update_metrics["clip_fraction"],
+                    "approx_kl": update_metrics["approx_kl"],
+                    "log_std": float(self.actor.log_std.data.mean().item()),
+                    "elapsed_sec": elapsed,
+                }
+                logger.log(log_record)
+                
+                # Console Output
+                kl_flag = " (KL stopped)" if update_metrics.get("kl_early_stopped", False) else ""
+                print(
+                    f"Iter {iteration:03d}/{self.cfg.num_iterations:03d} {phase_tag:<18} | "
+                    f"EpRet: {rollout_metrics['ep_return']:7.1f} | "
+                    f"StepR: {rollout_metrics['step_reward']:6.2f} | "
+                    f"Succ: {rollout_metrics['success_rate']*100:5.1f}% | "
+                    f"Drop: {rollout_metrics['drop_rate']*100:5.1f}% | "
+                    f"CritLoss: {update_metrics['loss_critic']:6.4f} | "
+                    f"ActLoss: {update_metrics['loss_actor']:6.4f} | "
+                    f"KL: {update_metrics['approx_kl']:.4f}{kl_flag} | "
+                    f"Time: {elapsed:4.1f}s"
+                )
+                
+                # Model Checkpointing
+                if not is_warmup:
+                    if rollout_metrics["success_rate"] > best_success_rate and rollout_metrics["success_rate"] > 0.0:
+                        best_success_rate = rollout_metrics["success_rate"]
+                        self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
+                    elif best_success_rate == 0.0 and rollout_metrics["ep_return"] > best_ep_return:
+                        best_ep_return = rollout_metrics["ep_return"]
+                        self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
+                    
+                    # Checkpoint latest model every 5 iterations or at final iteration
+                    if iteration % 5 == 0 or iteration == self.cfg.num_iterations:
+                        self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
+                        
+                    # Adaptive Curriculum on Epsilon: automatically tightens goal tolerance as agent masters rotation
+                    if self.cfg.curriculum_epsilon:
+                        recent_succ = rollout_metrics["success_rate"]
+                        current_eps = self.cfg.epsilon
+                        if recent_succ >= 0.15 and current_eps > self.cfg.min_epsilon:
+                            new_eps = max(self.cfg.min_epsilon, current_eps * 0.98)
+                            self.cfg.epsilon = new_eps
+                            self.vec_env.set_epsilon(new_eps)
+                            print(f"  [Curriculum] High proficiency ({recent_succ*100:.1f}%). Tightened tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f} deg)")
+                        
+                if iteration % 25 == 0 or iteration == self.cfg.num_iterations:
+                    self.save_checkpoint(os.path.join(output_dir, f"ppo_checkpoint_iter_{iteration}.pth"), iteration, rollout_metrics)
+        except KeyboardInterrupt:
+            print("\n[PPOFineTuner] Training interrupted by user (Ctrl+C). Saving latest checkpoint...")
+            if 'rollout_metrics' in locals():
+                self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
+        finally:
+            self.vec_env.close()
+            
         total_time = (time.time() - start_time) / 60.0
         print("\n" + "="*75)
         print(f"PPO FINE-TUNING FINISHED in {total_time:.2f} minutes!")
@@ -1161,10 +1410,17 @@ def parse_args():
     parser.add_argument("--ppo_epochs", type=int, default=5, help="Epochs per rollout update (default: 5)")
     parser.add_argument("--warmup_iters", type=int, default=30, help="Critic warm-up iterations where Actor is frozen (default: 30)")
     parser.add_argument("--actor_lr", type=float, default=2e-5, help="Actor learning rate (default: 2e-5)")
-    parser.add_argument("--critic_lr", type=float, default=3e-4, help="Critic learning rate")
+    parser.add_argument("--critic_lr", type=float, default=1e-4, help="Critic learning rate (default: 1e-4)")
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO clipping epsilon")
-    parser.add_argument("--target_kl", type=float, default=0.02, help="Target KL divergence for early stopping (default: 0.02)")
+    parser.add_argument("--target_kl", type=float, default=0.025, help="Target KL divergence for early stopping (default: 0.025)")
+    parser.add_argument("--log_std", type=float, default=-2.8, help="Initial log std for Gaussian exploration (default: -2.8)")
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
+    parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel MuJoCo environments (default: 8 for 10x-15x speedup; set to 1 for render mode)")
+    parser.add_argument("--epsilon", type=float, default=0.35, help="Orientation success threshold in radians (default: 0.35 rad ~= 20 deg)")
+    parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
+    parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
+    parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive curriculum tightening on epsilon when success > 15%%")
+    parser.add_argument("--min_epsilon", type=float, default=0.20, help="Minimum epsilon threshold for curriculum in radians (default: 0.20 rad ~= 11.5 deg)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30%% on mass, friction, size)")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
@@ -1198,6 +1454,10 @@ def main():
         cand2 = os.path.join(project_root, "in_hand_manipulation/simulation/scene_cube.xml")
         scene_path = cand1 if os.path.exists(cand1) else cand2
         
+    num_envs = 1 if args.render else args.num_envs
+    if args.render and args.num_envs > 1:
+        print("[Notice] Interactive 3D viewer enabled: running with num_envs=1.")
+        
     config = PPOConfig(
         num_iterations=args.iterations,
         rollout_steps=args.rollout_steps,
@@ -1208,7 +1468,14 @@ def main():
         critic_lr=args.critic_lr,
         clip_eps=args.clip_eps,
         target_kl=args.target_kl,
+        initial_log_std=args.log_std,
         max_episode_steps=args.max_steps,
+        num_envs=num_envs,
+        epsilon=args.epsilon,
+        curriculum_epsilon=args.curriculum_epsilon,
+        min_epsilon=args.min_epsilon,
+        w_progress=args.w_progress,
+        w_action_rate=args.w_action_rate,
         render=args.render,
         show_actions=args.show_actions,
         dr_ratio=args.dr_ratio,

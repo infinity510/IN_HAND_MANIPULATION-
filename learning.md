@@ -648,6 +648,31 @@ When saving and resuming checkpoints (`ppo_best_actor.pth`, `ppo_latest_actor.pt
 - **Critic Warm-Up:** When fine-tuning from a converged PPO checkpoint, `--warmup_iters 10` is used to allow the Critic value network to realign with any modified reward formulations without disturbing Actor policy weights.
 
 
+## 19. Dedicated Three-Stage Evaluation Architecture
+
+To benchmark policies under standardized, stage-specific physical constraints, three dedicated evaluation scripts were created:
+
+```
+in_hand_manipulation/
+├── evaluate_stage1.py    # Stage 1: Tripod Precision Envelope (theta <= 45.8 deg)
+├── evaluate_stage2.py    # Stage 2: Large-Angle Gaiting Envelope (34.4 deg <= theta <= 80.2 deg)
+└── evaluate_stage3.py    # Stage 3: Full SO(3) Extreme Flips & Chaining (theta up to 180.0 deg)
+```
+
+### Stage Comparison & Benchmark Protocols:
+
+| Feature | Stage 1 (`evaluate_stage1.py`) | Stage 2 (`evaluate_stage2.py`) | Stage 3 (`evaluate_stage3.py`) |
+| :--- | :--- | :--- | :--- |
+| **Target Rotation Angle** | $\theta \in [8.6^\circ, 45.8^\circ]$ ($0.15 \to 0.80\text{ rad}$) | $\theta \in [34.4^\circ, 80.2^\circ]$ ($0.60 \to 1.40\text{ rad}$) | Full $SO(3)$ up to $180.0^\circ$ ($\pi\text{ rad}$) |
+| **Physics Envelope** | Reachable tripod finger rolling | Multi-face sliding & finger gaiting | Continuous re-grasping & flips |
+| **Horizon Law** | $[200 + 150\theta + 150\theta^2]$ (max 500 steps) | $[250 + 200\theta + 150\theta^2]$ (max 800 steps) | $[300 + 200\theta + 150\theta^2]$ (max 800 steps) |
+| **Success Law** | Proportional $10\%$ of actual angle | Proportional $10\%$ of actual angle | Proportional $10\%$ + Goal chaining |
+| **Key Metric** | $\text{EMI} = \mathcal{R} \times \mathcal{C}$ & Sub-$5^\circ$ error | $\text{EMI}$ & Grasp stability under gait | $\text{EMI}$ & Average chained goals |
+| **Visual Markers** | Dynamic 3D Green Target Arrow + 1.0s pause | Dynamic 3D Green Target Arrow + 1.0s pause | Dynamic 3D Green Target Arrow + 1.0s pause |
+| **Headless Benchmark**| `--no_render` | `--no_render` | `--no_render` |
+
+
+
 
 
 

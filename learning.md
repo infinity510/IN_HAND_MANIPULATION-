@@ -436,6 +436,27 @@ The 1,000-iteration Continuous PPO training run completed at 18:04:
 3. **Full $SO(3)$ Arbitrary $180^\circ$ In-Hand Flips:**
    - Requires $\approx 2,000 - 3,000$ iterations ($\approx 30 - 45\text{ minutes}$) with multi-stage finger gaits.
 
+---
+
+## 13. Strategic Decision: Stage 1 Precision Mastery & Workspace Clean-Up
+
+### Strategic Rationale:
+- Rather than immediately expanding to $90^\circ - 180^\circ$ extreme rotations, the decision was made to **master Stage 1 precision** first.
+- Goal: Drive alignment error down to **$\le 15^\circ - 20^\circ$** with **$\ge 85\% - 90\%$ success** and **$\le 10\%$ drop rate** within the reachable $45^\circ$ tripod envelope before attempting multi-finger gaiting.
+
+### Precision Tuning Hyperparameters:
+- **Angle Ceiling Locked:** `--max_goal_angle 0.80 --target_max_goal_angle 0.80` (remains within stable tripod envelope).
+- **Tightened Orientation Precision:** `--epsilon 0.25 --min_epsilon 0.18` (tightens tolerance floor to $10.3^\circ$).
+- **Tremor Suppression:** `--log_std -3.2` ($\sigma \approx 0.0407\text{ rad} \approx 2.33^\circ$, enabling micro-tactile contact adjustment without finger vibration).
+- **Fine Progress Signal:** `--w_progress 3.0` (amplifies rewards for millimeter-scale orientation corrections).
+- **Early Reset Penalty:** `--w5 25.0` (maintains high penalty against drops).
+
+### Workspace Maintenance:
+- Cleaned up 39 redundant intermediate `.pth` checkpoints in `checkpoints_ppo/` (reclaimed ~375 MB).
+- Preserved core milestone: `ppo_checkpoint_iter_1000.pth`, `ppo_best_actor.pth`, and `ppo_latest_actor.pth`.
+- Purged all Python bytecode caches (`__pycache__`).
+
+
 
 
 

@@ -2,26 +2,32 @@
 """
 run_overnight_precision_pipeline.py
 =============================================================================
-Autonomous overnight pipeline for Stage 1 In-Hand Manipulation:
-1. Monitors Phase 1 training (10,000 iterations at fixed EpsR=25%).
-2. Evaluates the resulting Phase 1 best model.
-3. Automatically launches Phase 2: High-Precision Refinement (EpsR=10%, sub-5° error, 70%+ accuracy).
-4. Evaluates the refined model with 50 test episodes.
-5. Updates learning.md, commits, and pushes to git.
+Autonomous Overnight Multi-Stage Pipeline for In-Hand Manipulation:
+
+Curriculum Flow (User Specification):
+1. Stage 1 @ 25% tolerance (Current 10k run) -> Backup & evaluate
+2. Stage 1 @ 20% tolerance (7,000 iters)    -> Backup & evaluate
+3. Stage 1 @ 15% tolerance (5,000 iters)    -> Backup & evaluate
+4. Stage 1 @ 10% tolerance (10,000 iters)   -> Backup & full 50-ep evaluation
+5. Stage 2 (90° / 1.57 rad envelope) in same sequence:
+   - 20% tolerance (7,000 iters)           -> Backup & evaluate
+   - 15% tolerance (5,000 iters)           -> Backup & evaluate
+   - 10% tolerance (10,000 iters)          -> Backup & full 50-ep evaluation
 =============================================================================
 """
 
 import os
 import sys
 import time
+import shutil
 import subprocess
-import json
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 os.chdir(PROJECT_ROOT)
 
 LOG_FILE = os.path.join(PROJECT_ROOT, "overnight_pipeline.log")
+REPORT_FILE = os.path.join(PROJECT_ROOT, "OVERNIGHT_MASTER_REPORT.md")
 
 
 def log(msg: str):
@@ -32,11 +38,15 @@ def log(msg: str):
         f.write(line + "\n")
 
 
-def is_process_running(pattern: str) -> bool:
+def append_report(section: str):
+    with open(REPORT_FILE, "a") as f:
+        f.write(section + "\n\n")
+
+
+def is_train_running() -> bool:
     try:
-        res = subprocess.run(["pgrep", "-f", pattern], stdout=subprocess.PIPE, text=True)
+        res = subprocess.run(["pgrep", "-f", "train_ppo.py"], stdout=subprocess.PIPE, text=True)
         pids = [p.strip() for p in res.stdout.split() if p.strip()]
-        # Ignore our own PID
         my_pid = str(os.getpid())
         pids = [p for p in pids if p != my_pid]
         return len(pids) > 0
@@ -44,148 +54,309 @@ def is_process_running(pattern: str) -> bool:
         return False
 
 
-def run_cmd(cmd_list, timeout=None):
-    log(f"Executing: {' '.join(cmd_list)}")
-    res = subprocess.run(cmd_list, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout)
-    return res.returncode, res.stdout
+def wait_for_current_training(stage_name: str, progress_file: str, target_iters: int):
+    log(f"Waiting for {stage_name} to finish ({target_iters} iterations)...")
+    last_reported = 0
+    while is_train_running():
+        if os.path.exists(progress_file):
+            try:
+                with open(progress_file, "r") as f:
+                    lines = f.readlines()
+                    if len(lines) > 1:
+                        last = lines[-1].strip().split(",")
+                        cur_iter = int(last[0])
+                        if cur_iter - last_reported >= 500:
+                            last_reported = cur_iter
+                            succ = float(last[4]) * 100
+                            drop = float(last[5]) * 100
+                            clos = float(last[7]) * 100
+                            emi = float(last[8])
+                            err = float(last[10])
+                            eps_r = float(last[9]) * 100
+                            log(f"  [{stage_name} Iter {cur_iter:05d}/{target_iters}] EMI: {emi:.3f} | Succ: {succ:4.1f}% | Drop: {drop:4.1f}% | Clos: {clos:4.1f}% | Err: {err:4.1f}° | EpsR: {eps_r:4.1f}%")
+            except Exception:
+                pass
+        time.sleep(30)
+    log(f"{stage_name} completed successfully!")
+    time.sleep(5)
+
+
+def run_training_stage(
+    stage_name: str,
+    iterations: int,
+    checkpoint_in: str,
+    output_dir: str,
+    epsilon_ratio: float,
+    max_goal_angle: float = 0.80,
+    w_progress: float = 4.0,
+    w_precision: float = 2.0,
+    w4: float = 16.0,
+    w5: float = 15.0,
+    actor_lr: float = 1.8e-5,
+    critic_lr: float = 9e-5,
+) -> str:
+    log(f"\n=======================================================")
+    log(f"LAUNCHING: {stage_name}")
+    log(f"  Iterations: {iterations} | EpsR: {epsilon_ratio*100:.1f}% | Max Angle: {max_goal_angle:.2f} rad")
+    log(f"  Input Checkpoint: {checkpoint_in}")
+    log(f"  Output Directory: {output_dir}")
+    log(f"=======================================================")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    cmd = [
+        "python3", "in_hand_manipulation/train_ppo.py",
+        "--iterations", str(iterations),
+        "--num_envs", "16",
+        "--checkpoint", checkpoint_in,
+        "--warmup_iters", "0",
+        "--w_progress", str(w_progress),
+        "--w_precision", str(w_precision),
+        "--w4", str(w4),
+        "--w5", str(w5),
+        "--epsilon_ratio", str(epsilon_ratio),
+        "--max_goal_angle", str(max_goal_angle),
+        "--actor_lr", str(actor_lr),
+        "--critic_lr", str(critic_lr),
+        "--save_freq", "250",
+        "--output_dir", output_dir
+    ]
+    
+    log(f"Command: {' '.join(cmd)}")
+    proc = subprocess.Popen(cmd)
+    
+    progress_csv = os.path.join(output_dir, "progress.csv")
+    last_reported = 0
+    while proc.poll() is None:
+        if os.path.exists(progress_csv):
+            try:
+                with open(progress_csv, "r") as f:
+                    lines = f.readlines()
+                    if len(lines) > 1:
+                        last = lines[-1].strip().split(",")
+                        cur_iter = int(last[0])
+                        if cur_iter - last_reported >= 500:
+                            last_reported = cur_iter
+                            succ = float(last[4]) * 100
+                            drop = float(last[5]) * 100
+                            clos = float(last[7]) * 100
+                            emi = float(last[8])
+                            err = float(last[10])
+                            log(f"  [{stage_name} Iter {cur_iter:05d}/{iterations}] EMI: {emi:.3f} | Succ: {succ:4.1f}% | Drop: {drop:4.1f}% | Clos: {clos:4.1f}% | Err: {err:4.1f}°")
+            except Exception:
+                pass
+        time.sleep(30)
+        
+    log(f"{stage_name} training finished (exit code: {proc.returncode})!")
+    time.sleep(5)
+    
+    best_ckpt = os.path.join(output_dir, "ppo_best_actor.pth")
+    if not os.path.exists(best_ckpt):
+        best_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
+    return best_ckpt
+
+
+def evaluate_model(eval_script: str, checkpoint: str, episodes: int, stage_label: str) -> str:
+    log(f"Evaluating {stage_label} ({episodes} episodes) using {eval_script}...")
+    res = subprocess.run([
+        "python3", os.path.join(PROJECT_ROOT, eval_script),
+        "--checkpoint", checkpoint,
+        "--episodes", str(episodes),
+        "--no_render"
+    ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    
+    summary = res.stdout[-1500:] if len(res.stdout) > 1500 else res.stdout
+    log(f"Evaluation Summary for {stage_label}:\n{summary}")
+    return summary
+
+
+def git_commit_and_push(commit_msg: str):
+    log(f"Syncing with git: {commit_msg}")
+    try:
+        subprocess.run(["git", "add", "OVERNIGHT_MASTER_REPORT.md", "checkpoints_ppo/"], stdout=subprocess.PIPE, text=True)
+        subprocess.run(["git", "commit", "-m", commit_msg], stdout=subprocess.PIPE, text=True)
+        subprocess.run(["git", "push", "origin", "main"], stdout=subprocess.PIPE, text=True)
+        log("Git push successful.")
+    except Exception as e:
+        log(f"Note on git sync: {e}")
 
 
 def main():
-    log("=== OVERNIGHT AUTONOMOUS PIPELINE STARTED ===")
+    log("================================================================")
+    log("=== OVERNIGHT MULTI-STAGE CURRICULUM ORCHESTRATOR STARTED ===")
+    log("================================================================")
     
-    # -------------------------------------------------------------
-    # 1. MONITOR PHASE 1 (Currently running 10k training)
-    # -------------------------------------------------------------
-    log("Step 1: Monitoring Phase 1 10k training process...")
-    last_iter_report = 0
-    while is_process_running("train_ppo.py --iterations 10000"):
-        # Check current iteration from progress.csv if available
-        prog_path = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "progress.csv")
-        if os.path.exists(prog_path):
-            try:
-                with open(prog_path, "r") as f:
-                    lines = f.readlines()
-                    if len(lines) > 1:
-                        last_line = lines[-1].strip().split(",")
-                        current_iter = int(last_line[0])
-                        if current_iter - last_iter_report >= 500:
-                            last_iter_report = current_iter
-                            succ = float(last_line[4]) * 100
-                            drop = float(last_line[5]) * 100
-                            clos = float(last_line[7]) * 100
-                            emi = float(last_line[8])
-                            err = float(last_line[10])
-                            log(f"  [Progress] Iter {current_iter:04d}/10000 | EMI: {emi:.3f} | Succ: {succ:.1f}% | Drop: {drop:.1f}% | Clos: {clos:.1f}% | Err: {err:.1f}°")
-            except Exception:
-                pass
-        time.sleep(30)
+    if not os.path.exists(REPORT_FILE):
+        with open(REPORT_FILE, "w") as f:
+            f.write("# Overnight In-Hand Manipulation Multi-Stage Training Report\n\n")
     
-    log("Phase 1 training has finished!")
-    time.sleep(5)
+    # -----------------------------------------------------------------
+    # STEP 1: Wait for Stage 1 (25% tolerance) Current 10k Run
+    # -----------------------------------------------------------------
+    log("STAGE 1.0: Monitoring active 10k run @ 25% tolerance...")
+    wait_for_current_training("Stage 1 @ 25%", "checkpoints_ppo/progress.csv", 10000)
     
-    # -------------------------------------------------------------
-    # 2. EVALUATE PHASE 1 MODEL
-    # -------------------------------------------------------------
-    phase1_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_best_actor.pth")
-    if not os.path.exists(phase1_ckpt):
-        phase1_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_latest_actor.pth")
+    stage1_25_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage1_25pct_best.pth")
+    current_best = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_best_actor.pth")
+    shutil.copyfile(current_best, stage1_25_ckpt)
+    log(f"Backed up Stage 1 (25%) best model to: {stage1_25_ckpt}")
     
-    log(f"Step 2: Evaluating Phase 1 model: {phase1_ckpt}")
-    code, eval_out = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_stage1.py",
-        "--checkpoint", phase1_ckpt,
-        "--episodes", "20",
-        "--no_render"
-    ])
-    log("Phase 1 Evaluation Output:\n" + eval_out[-1200:])
+    eval_s1_25 = evaluate_model("in_hand_manipulation/evaluate_stage1.py", stage1_25_ckpt, 25, "Stage 1 @ 25%")
+    append_report(f"## 1. Stage 1 (25% Tolerance - 10k Iterations)\n```\n{eval_s1_25}\n```")
+    git_commit_and_push("checkpoint: Stage 1 25% completion & evaluation")
     
-    # -------------------------------------------------------------
-    # 3. LAUNCH PHASE 2: PRECISION REFINEMENT (EpsR = 10%)
-    # -------------------------------------------------------------
-    prec_output_dir = os.path.join(PROJECT_ROOT, "checkpoints_ppo_precision")
-    os.makedirs(prec_output_dir, exist_ok=True)
+    # -----------------------------------------------------------------
+    # STEP 2: Mini Stage 1.1 @ 20% Tolerance (7,000 Iterations)
+    # -----------------------------------------------------------------
+    s1_20_best = run_training_stage(
+        stage_name="Stage 1 @ 20% (Mini-Stage 1)",
+        iterations=7000,
+        checkpoint_in=stage1_25_ckpt,
+        output_dir="checkpoints_stage1_20pct",
+        epsilon_ratio=0.20,
+        max_goal_angle=0.80,
+        w_progress=4.0,
+        w_precision=2.5,
+        w4=16.0,
+        w5=15.0,
+        actor_lr=1.8e-5,
+        critic_lr=9e-5,
+    )
+    stage1_20_backup = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage1_20pct_best.pth")
+    shutil.copyfile(s1_20_best, stage1_20_backup)
+    log(f"Backed up Stage 1 (20%) best model to: {stage1_20_backup}")
     
-    log("Step 3: Launching Phase 2 High-Precision Training (EpsR=0.10, sub-5° target)...")
-    phase2_cmd = [
-        "python3", "in_hand_manipulation/train_ppo.py",
-        "--iterations", "4000",
-        "--num_envs", "16",
-        "--checkpoint", phase1_ckpt,
-        "--warmup_iters", "0",
-        "--w_progress", "4.0",
-        "--w_precision", "3.0",
-        "--w4", "20.0",
-        "--w5", "15.0",
-        "--epsilon_ratio", "0.10",
-        "--actor_lr", "1.5e-5",
-        "--critic_lr", "8e-5",
-        "--save_freq", "250",
-        "--output_dir", "checkpoints_ppo_precision"
-    ]
+    eval_s1_20 = evaluate_model("in_hand_manipulation/evaluate_stage1.py", stage1_20_backup, 25, "Stage 1 @ 20%")
+    append_report(f"## 2. Stage 1 (20% Tolerance - 7k Iterations)\n```\n{eval_s1_20}\n```")
+    git_commit_and_push("checkpoint: Stage 1 20% completion & evaluation")
     
-    log(f"Running Phase 2 Command: {' '.join(phase2_cmd)}")
-    p2_proc = subprocess.Popen(phase2_cmd)
+    # -----------------------------------------------------------------
+    # STEP 3: Mini Stage 1.2 @ 15% Tolerance (5,000 Iterations)
+    # -----------------------------------------------------------------
+    s1_15_best = run_training_stage(
+        stage_name="Stage 1 @ 15% (Mini-Stage 2)",
+        iterations=5000,
+        checkpoint_in=stage1_20_backup,
+        output_dir="checkpoints_stage1_15pct",
+        epsilon_ratio=0.15,
+        max_goal_angle=0.80,
+        w_progress=4.0,
+        w_precision=3.0,
+        w4=18.0,
+        w5=15.0,
+        actor_lr=1.5e-5,
+        critic_lr=8e-5,
+    )
+    stage1_15_backup = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage1_15pct_best.pth")
+    shutil.copyfile(s1_15_best, stage1_15_backup)
+    log(f"Backed up Stage 1 (15%) best model to: {stage1_15_backup}")
     
-    p2_last_report = 0
-    while p2_proc.poll() is None:
-        p2_prog_path = os.path.join(prec_output_dir, "progress.csv")
-        if os.path.exists(p2_prog_path):
-            try:
-                with open(p2_prog_path, "r") as f:
-                    lines = f.readlines()
-                    if len(lines) > 1:
-                        last_line = lines[-1].strip().split(",")
-                        current_iter = int(last_line[0])
-                        if current_iter - p2_last_report >= 250:
-                            p2_last_report = current_iter
-                            succ = float(last_line[4]) * 100
-                            drop = float(last_line[5]) * 100
-                            clos = float(last_line[7]) * 100
-                            emi = float(last_line[8])
-                            err = float(last_line[10])
-                            log(f"  [Precision Iter {current_iter:04d}/4000] EMI: {emi:.3f} | Succ (<=10%): {succ:.1f}% | Drop: {drop:.1f}% | Clos: {clos:.1f}% | Err: {err:.1f}°")
-            except Exception:
-                pass
-        time.sleep(30)
+    eval_s1_15 = evaluate_model("in_hand_manipulation/evaluate_stage1.py", stage1_15_backup, 25, "Stage 1 @ 15%")
+    append_report(f"## 3. Stage 1 (15% Tolerance - 5k Iterations)\n```\n{eval_s1_15}\n```")
+    git_commit_and_push("checkpoint: Stage 1 15% completion & evaluation")
     
-    log("Phase 2 Precision Training completed!")
-    time.sleep(5)
+    # -----------------------------------------------------------------
+    # STEP 4: Mini Stage 1.3 @ 10% Tolerance (10,000 Iterations)
+    # -----------------------------------------------------------------
+    s1_10_best = run_training_stage(
+        stage_name="Stage 1 @ 10% (Final Precision Target)",
+        iterations=10000,
+        checkpoint_in=stage1_15_backup,
+        output_dir="checkpoints_stage1_10pct",
+        epsilon_ratio=0.10,
+        max_goal_angle=0.80,
+        w_progress=4.0,
+        w_precision=4.0,
+        w4=20.0,
+        w5=15.0,
+        actor_lr=1.2e-5,
+        critic_lr=7e-5,
+    )
+    stage1_10_backup = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage1_10pct_best.pth")
+    stage1_golden_master = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage1_golden_master.pth")
+    shutil.copyfile(s1_10_best, stage1_10_backup)
+    shutil.copyfile(s1_10_best, stage1_golden_master)
+    log(f"Backed up Stage 1 (10%) Golden Master to: {stage1_golden_master}")
     
-    # -------------------------------------------------------------
-    # 4. FINAL VERIFICATION BENCHMARK (50 Episodes)
-    # -------------------------------------------------------------
-    final_ckpt = os.path.join(prec_output_dir, "ppo_best_actor.pth")
-    if not os.path.exists(final_ckpt):
-        final_ckpt = os.path.join(prec_output_dir, "ppo_latest_actor.pth")
-        
-    log(f"Step 4: Running 50-episode Final Verification Benchmark on: {final_ckpt}")
-    code, final_eval_out = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_stage1.py",
-        "--checkpoint", final_ckpt,
-        "--episodes", "50",
-        "--no_render"
-    ])
-    log("Final 50-Episode Benchmark Summary:\n" + final_eval_out[-1500:])
+    eval_s1_10 = evaluate_model("in_hand_manipulation/evaluate_stage1.py", stage1_golden_master, 50, "Stage 1 Golden Master (10%)")
+    append_report(f"## 4. Stage 1 Final (10% Tolerance - 10k Iterations - Golden Master)\n```\n{eval_s1_10}\n```")
+    git_commit_and_push("checkpoint: Stage 1 10% Golden Master completion & full 50-ep evaluation")
     
-    # Save overnight summary report
-    report_path = os.path.join(prec_output_dir, "OVERNIGHT_REPORT.md")
-    with open(report_path, "w") as f:
-        f.write("# Stage 1 Precision Refinement Overnight Report\n\n")
-        f.write(f"Completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        f.write("```\n")
-        f.write(final_eval_out[-2000:])
-        f.write("\n```\n")
-    log(f"Saved overnight report to: {report_path}")
+    # -----------------------------------------------------------------
+    # STEP 5: Stage 2 (90° / 1.57 rad Large-Angle Envelope) @ 20% Tolerance (7k)
+    # -----------------------------------------------------------------
+    s2_20_best = run_training_stage(
+        stage_name="Stage 2 (90°) @ 20% Tolerance",
+        iterations=7000,
+        checkpoint_in=stage1_golden_master,
+        output_dir="checkpoints_stage2_20pct",
+        epsilon_ratio=0.20,
+        max_goal_angle=1.57,
+        w_progress=4.0,
+        w_precision=2.5,
+        w4=18.0,
+        w5=15.0,
+        actor_lr=1.5e-5,
+        critic_lr=8e-5,
+    )
+    stage2_20_backup = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage2_20pct_best.pth")
+    shutil.copyfile(s2_20_best, stage2_20_backup)
     
-    # -------------------------------------------------------------
-    # 5. COMMIT & PUSH
-    # -------------------------------------------------------------
-    log("Step 5: Committing documentation and pushing to GitHub...")
-    run_cmd(["git", "add", "learning.md", "checkpoints_ppo_precision/OVERNIGHT_REPORT.md"])
-    run_cmd(["git", "commit", "-m", "chore: overnight stage 1 precision training and verification report"])
-    run_cmd(["git", "push", "origin", "main"])
+    eval_s2_20 = evaluate_model("in_hand_manipulation/evaluate_stage2.py", stage2_20_backup, 25, "Stage 2 @ 20%")
+    append_report(f"## 5. Stage 2 (90° - 20% Tolerance - 7k Iterations)\n```\n{eval_s2_20}\n```")
+    git_commit_and_push("checkpoint: Stage 2 20% completion & evaluation")
     
-    log("=== OVERNIGHT PIPELINE FULLY COMPLETED! ===")
+    # -----------------------------------------------------------------
+    # STEP 6: Stage 2 (90°) @ 15% Tolerance (5k)
+    # -----------------------------------------------------------------
+    s2_15_best = run_training_stage(
+        stage_name="Stage 2 (90°) @ 15% Tolerance",
+        iterations=5000,
+        checkpoint_in=stage2_20_backup,
+        output_dir="checkpoints_stage2_15pct",
+        epsilon_ratio=0.15,
+        max_goal_angle=1.57,
+        w_progress=4.0,
+        w_precision=3.0,
+        w4=20.0,
+        w5=15.0,
+        actor_lr=1.2e-5,
+        critic_lr=7e-5,
+    )
+    stage2_15_backup = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage2_15pct_best.pth")
+    shutil.copyfile(s2_15_best, stage2_15_backup)
+    
+    eval_s2_15 = evaluate_model("in_hand_manipulation/evaluate_stage2.py", stage2_15_backup, 25, "Stage 2 @ 15%")
+    append_report(f"## 6. Stage 2 (90° - 15% Tolerance - 5k Iterations)\n```\n{eval_s2_15}\n```")
+    git_commit_and_push("checkpoint: Stage 2 15% completion & evaluation")
+    
+    # -----------------------------------------------------------------
+    # STEP 7: Stage 2 (90°) @ 10% Tolerance (10k)
+    # -----------------------------------------------------------------
+    s2_10_best = run_training_stage(
+        stage_name="Stage 2 (90°) @ 10% Tolerance",
+        iterations=10000,
+        checkpoint_in=stage2_15_backup,
+        output_dir="checkpoints_stage2_10pct",
+        epsilon_ratio=0.10,
+        max_goal_angle=1.57,
+        w_progress=4.0,
+        w_precision=4.0,
+        w4=22.0,
+        w5=15.0,
+        actor_lr=1.0e-5,
+        critic_lr=6e-5,
+    )
+    stage2_golden_master = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "stage2_golden_master.pth")
+    shutil.copyfile(s2_10_best, stage2_golden_master)
+    
+    eval_s2_10 = evaluate_model("in_hand_manipulation/evaluate_stage2.py", stage2_golden_master, 50, "Stage 2 Golden Master (10%)")
+    append_report(f"## 7. Stage 2 Final (90° - 10% Tolerance - 10k Iterations - Golden Master)\n```\n{eval_s2_10}\n```")
+    git_commit_and_push("checkpoint: Stage 2 10% Golden Master completion & full 50-ep evaluation")
+    
+    log("================================================================")
+    log("=== OVERNIGHT MULTI-STAGE CURRICULUM COMPLETED ALL STAGES! ===")
+    log("================================================================")
 
 
 if __name__ == "__main__":

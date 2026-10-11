@@ -112,6 +112,7 @@ class PPOConfig:
     max_episode_steps: int = 250    # Max steps per episode before time-limit truncation
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
+    dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
 
 
 
@@ -133,6 +134,7 @@ class DeltoInHandManipulationEnv:
         max_episode_steps: int = 250,
         substeps: int = 10,
         render_mode: bool = False,
+        dr_ratio: float = 0.30,
     ):
         if not os.path.exists(scene_xml_path):
             raise FileNotFoundError(f"MuJoCo XML scene not found at {scene_xml_path}")
@@ -144,6 +146,23 @@ class DeltoInHandManipulationEnv:
         self.substeps = substeps  # 10 substeps * 0.002s = 0.02s per RL step (50 Hz)
         self.render_mode = render_mode
         self.viewer = None
+        
+        # Domain Randomization Setup (+-30% on mass, friction, and size)
+        self.dr_ratio = dr_ratio
+        self.nominal_obj_props = {}
+        for obj_id in [1, 2, 3]:
+            b_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"obj_{obj_id}")
+            g_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"obj_{obj_id}_geom")
+            self.nominal_obj_props[obj_id] = {
+                "body_id": b_id,
+                "geom_id": g_id,
+                "mass": float(self.model.body_mass[b_id]),
+                "inertia": self.model.body_inertia[b_id].copy(),
+                "friction": self.model.geom_friction[g_id].copy(),
+                "size": self.model.geom_size[g_id].copy(),
+                "phys_params": self.get_physical_params(obj_id).copy(),
+            }
+        self.current_phys_params = np.array([0.045, 0.07, 1.0, 3.0], dtype=np.float32)
         
         if self.render_mode:
             try:
@@ -229,7 +248,43 @@ class DeltoInHandManipulationEnv:
         else:
             self.active_object_id = int(object_id)
             
-        # 3. Position Active Object in hand [0.0, 0.0, 0.10], move other objects away
+        # 3. Apply Domain Randomization (+-30% on mass, friction, and size)
+        props = self.nominal_obj_props[self.active_object_id]
+        body_id = props["body_id"]
+        geom_id = props["geom_id"]
+        
+        if self.dr_ratio > 0.0:
+            # Sample independent uniform random scaling factors in [1 - dr_ratio, 1 + dr_ratio]
+            scale_size = float(np.random.uniform(1.0 - self.dr_ratio, 1.0 + self.dr_ratio))
+            scale_mass = float(np.random.uniform(1.0 - self.dr_ratio, 1.0 + self.dr_ratio))
+            scale_fric = float(np.random.uniform(1.0 - self.dr_ratio, 1.0 + self.dr_ratio))
+            
+            # Apply to MuJoCo physical model
+            self.model.geom_size[geom_id] = props["size"] * scale_size
+            self.model.body_mass[body_id] = props["mass"] * scale_mass
+            self.model.body_inertia[body_id] = props["inertia"] * scale_mass
+            
+            fric_copy = props["friction"].copy()
+            fric_copy[0] *= scale_fric  # Tangential sliding friction
+            self.model.geom_friction[geom_id] = fric_copy
+            
+            # Construct actual randomized 4-dim parameter vector for the network observation:
+            # [radius/width * scale_size, height * scale_size, mass * scale_mass, friction * scale_fric]
+            base_phys = props["phys_params"]
+            self.current_phys_params = np.array([
+                base_phys[0] * scale_size,
+                base_phys[1] * scale_size,
+                base_phys[2] * scale_mass,
+                base_phys[3] * scale_fric
+            ], dtype=np.float32)
+        else:
+            self.model.geom_size[geom_id] = props["size"].copy()
+            self.model.body_mass[body_id] = props["mass"]
+            self.model.body_inertia[body_id] = props["inertia"].copy()
+            self.model.geom_friction[geom_id] = props["friction"].copy()
+            self.current_phys_params = props["phys_params"].copy()
+            
+        # 4. Position Active Object in hand [0.0, 0.0, 0.10], move other objects away
         for i in range(1, 4):
             idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
             vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
@@ -241,7 +296,7 @@ class DeltoInHandManipulationEnv:
                 self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.10, 1.0, 0.0, 0.0, 0.0]
             self.data.qvel[vel_idx:vel_idx+6] = 0.0
             
-        # 4. Generate Random Target Goal Orientation (Quat [w, x, y, z])
+        # 5. Generate Random Target Goal Orientation (Quat [w, x, y, z])
         rand_rot = transform.Rotation.random()
         q_xyzw = rand_rot.as_quat()  # Scipy is [x, y, z, w]
         self.target_quat = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
@@ -254,7 +309,8 @@ class DeltoInHandManipulationEnv:
         obs = self._get_observation()
         info = {
             "object_id": self.active_object_id,
-            "target_quat": self.target_quat.copy()
+            "target_quat": self.target_quat.copy(),
+            "phys_params": self.current_phys_params.copy()
         }
         return obs, info
 
@@ -270,9 +326,8 @@ class DeltoInHandManipulationEnv:
         obj_pos = self.data.qpos[obj_idx:obj_idx+3].astype(np.float32)
         obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].astype(np.float32)
         
-        phys_params = self.get_physical_params(self.active_object_id)
-        
-        obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, phys_params], axis=0)
+        # Injects the randomized physical parameters into observation state
+        obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, self.current_phys_params], axis=0)
         
         # Apply observation normalization from BC pretraining: (s - mean) / std
         obs_norm = (obs_raw - self.obs_mean) / self.obs_std
@@ -749,7 +804,8 @@ class PPOFineTuner:
             obs_mean=self.obs_mean,
             obs_std=self.obs_std,
             max_episode_steps=self.cfg.max_episode_steps,
-            render_mode=self.cfg.render
+            render_mode=self.cfg.render,
+            dr_ratio=self.cfg.dr_ratio
         )
         
         # 6. Persistent Telemetry Queues across rollout boundaries
@@ -1067,6 +1123,7 @@ def parse_args():
     parser.add_argument("--actor_lr", type=float, default=3e-5, help="Actor learning rate")
     parser.add_argument("--critic_lr", type=float, default=3e-4, help="Critic learning rate")
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO clipping epsilon")
+    parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30% by default on mass, friction, size)")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
     parser.add_argument("--checkpoint", type=str, default="", help="Path to bc_actor_checkpoint.pth")
@@ -1110,6 +1167,7 @@ def main():
         clip_eps=args.clip_eps,
         render=args.render,
         show_actions=args.show_actions,
+        dr_ratio=args.dr_ratio,
     )
     
     tuner = PPOFineTuner(

@@ -122,10 +122,18 @@ class PPOConfig:
     obs_dim: int = 39               # 12 qpos + 12 qvel + 3 obj_pos + 4 obj_quat + 4 target_quat + 4 phys_params
     act_dim: int = 12               # 12 actuated continuous joints of Delto hand
     num_envs: int = 8               # Parallel environment workers for multi-core speedup (16-core CPU default: 8)
-    max_episode_steps: int = 250    # Max steps per episode before time-limit truncation
+    max_episode_steps: int = 250    # Base episode steps before time-limit truncation (250 steps = 5.0s at 50Hz)
+    steps_per_radian: int = 200     # Additional episode steps granted per radian of required rotation (~3.5 steps/deg)
+    bonus_steps_per_success: int = 150 # Additional episode steps granted per goal orientation achieved (OpenAI Dactyl)
+    max_steps_cap: int = 800        # Hard maximum horizon ceiling in steps (800 steps = 16.0s at 50Hz)
     epsilon: float = 0.35           # Goal orientation tolerance in radians (~20.0 degrees)
-    curriculum_epsilon: bool = False # If True, adaptively tightens epsilon when proficiency is high (> 15% success)
-    min_epsilon: float = 0.20        # Minimum curriculum threshold in radians (~11.5 degrees)
+    curriculum_epsilon: bool = False # If True, adaptively tightens/relaxes epsilon based on proficiency
+    min_epsilon: float = 0.28        # Precision floor in radians (~16.0 degrees, prevents impossible mode)
+    max_epsilon: float = 0.40        # Upper tolerance ceiling in radians (~23.0 degrees)
+    max_goal_angle: float = 0.80     # Initial maximum goal rotation angle in radians (~45.8 degrees)
+    min_goal_angle: float = 0.60     # Minimum goal rotation angle floor in radians (~34.4 degrees)
+    target_max_goal_angle: float = 1.40 # Target max goal angle in radians (~80.2 degrees, matches BC demo envelope)
+    curriculum_goal_angle: bool = False # If True, adaptively expands/contracts max_goal_angle based on proficiency
     w_progress: float = 2.0          # Angular progress reward weight
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
@@ -153,6 +161,10 @@ class DeltoInHandManipulationEnv:
         substeps: int = 10,
         render_mode: bool = False,
         dr_ratio: float = 0.30,
+        max_goal_angle: float = math.pi,
+        steps_per_radian: int = 200,
+        bonus_steps_per_success: int = 150,
+        max_steps_cap: int = 800,
     ):
         if not os.path.exists(scene_xml_path):
             raise FileNotFoundError(f"MuJoCo XML scene not found at {scene_xml_path}")
@@ -161,9 +173,15 @@ class DeltoInHandManipulationEnv:
         self.data = mujoco.MjData(self.model)
         self.reward_weights = reward_weights or RewardWeights()
         self.max_episode_steps = max_episode_steps
+        self.base_episode_steps = max_episode_steps
+        self.steps_per_radian = steps_per_radian
+        self.bonus_steps_per_success = bonus_steps_per_success
+        self.max_steps_cap = max_steps_cap
+        self.current_max_steps = max_episode_steps
         self.substeps = substeps  # 10 substeps * 0.002s = 0.02s per RL step (50 Hz)
         self.render_mode = render_mode
         self.viewer = None
+        self.max_goal_angle = float(max_goal_angle)
         
         # Domain Randomization Setup (+-30% on mass, friction, and size)
         self.dr_ratio = dr_ratio
@@ -214,10 +232,27 @@ class DeltoInHandManipulationEnv:
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
         self.palm_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
+    def set_max_goal_angle(self, max_angle: float):
+        """Updates maximum goal rotation angle for curriculum training."""
+        self.max_goal_angle = float(max_angle)
+
     def _sample_target_quat(self) -> np.ndarray:
-        """Samples a new random 3D target quaternion [w, x, y, z] in SO(3)."""
-        rand_rot = transform.Rotation.random()
-        q_xyzw = rand_rot.as_quat()  # Scipy is [x, y, z, w]
+        """
+        Samples a new 3D target quaternion [w, x, y, z] in SO(3).
+        If max_goal_angle >= pi, samples uniformly across full SO(3).
+        Otherwise, samples a random rotation axis on S^2 and rotation angle in [min_angle, max_goal_angle].
+        """
+        if self.max_goal_angle >= (np.pi - 1e-4):
+            rand_rot = transform.Rotation.random()
+            q_xyzw = rand_rot.as_quat()  # Scipy is [x, y, z, w]
+            return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
+        
+        axis = np.random.randn(3)
+        axis = axis / (np.linalg.norm(axis) + 1e-8)
+        min_angle = min(0.15, self.max_goal_angle * 0.3)
+        angle = float(np.random.uniform(min_angle, self.max_goal_angle))
+        rand_rot = transform.Rotation.from_rotvec(axis * angle)
+        q_xyzw = rand_rot.as_quat()
         return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
 
     def _get_gripper_joint_names(self) -> List[str]:
@@ -337,6 +372,13 @@ class DeltoInHandManipulationEnv:
         cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
         self.prev_d_theta = self.compute_angular_distance(cur_obj_quat, self.target_quat)
         self.prev_action = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
+        
+        # Angle-Proportional Episode Horizon:
+        # Scales episode steps with required rotation angle so agent has proportional time for larger rotations
+        self.current_max_steps = min(
+            self.max_steps_cap,
+            int(self.base_episode_steps + self.steps_per_radian * self.prev_d_theta)
+        )
             
         obs = self._get_observation()
         info = {
@@ -467,6 +509,12 @@ class DeltoInHandManipulationEnv:
             self.target_quat = self._sample_target_quat()
             # Reset prev_d_theta against new goal so progress is accurately tracked for next step
             self.prev_d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
+            # OpenAI Dactyl Success Time Extension:
+            # Grants extra time per goal achieved so proficient policies can chain consecutive goals
+            self.current_max_steps = min(
+                self.max_steps_cap,
+                self.current_max_steps + self.bonus_steps_per_success
+            )
         else:
             self.prev_d_theta = d_theta
             
@@ -489,7 +537,7 @@ class DeltoInHandManipulationEnv:
         # Only dropping the object causes absorbing early termination.
         # Achieving target orientation rewards the agent and continues manipulating toward a new goal!
         terminated = is_dropped
-        truncated = (self.step_count >= self.max_episode_steps)
+        truncated = (self.step_count >= self.current_max_steps)
         
         next_obs = self._get_observation()
         info = {
@@ -568,6 +616,10 @@ class DummyVecEnv:
         for env in self.envs:
             env.reward_weights.epsilon = float(epsilon)
 
+    def set_max_goal_angle(self, max_angle: float):
+        for env in self.envs:
+            env.set_max_goal_angle(float(max_angle))
+
     def close(self):
         for env in self.envs:
             env.close()
@@ -615,6 +667,9 @@ class SubprocVecEnv:
             elif cmd == "set_epsilon":
                 env.reward_weights.epsilon = float(data)
                 pipe.send(True)
+            elif cmd == "set_max_goal_angle":
+                env.set_max_goal_angle(float(data))
+                pipe.send(True)
             elif cmd == "close":
                 env.close()
                 pipe.close()
@@ -644,6 +699,12 @@ class SubprocVecEnv:
     def set_epsilon(self, epsilon: float):
         for p in self.pipes:
             p.send(("set_epsilon", float(epsilon)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_max_goal_angle(self, max_angle: float):
+        for p in self.pipes:
+            p.send(("set_max_goal_angle", float(max_angle)))
         for p in self.pipes:
             p.recv()
 
@@ -1006,7 +1067,11 @@ class PPOFineTuner:
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
-                dr_ratio=self.cfg.dr_ratio
+                dr_ratio=self.cfg.dr_ratio,
+                max_goal_angle=self.cfg.max_goal_angle,
+                steps_per_radian=self.cfg.steps_per_radian,
+                bonus_steps_per_success=self.cfg.bonus_steps_per_success,
+                max_steps_cap=self.cfg.max_steps_cap,
             )
             
         if self.cfg.num_envs == 1:
@@ -1354,15 +1419,35 @@ class PPOFineTuner:
                     if iteration % 5 == 0 or iteration == self.cfg.num_iterations:
                         self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
                         
-                    # Adaptive Curriculum on Epsilon: automatically tightens goal tolerance as agent masters rotation
+                    # Adaptive Bidirectional Curriculum on Epsilon (Orientation Precision)
                     if self.cfg.curriculum_epsilon:
                         recent_succ = rollout_metrics["success_rate"]
                         current_eps = self.cfg.epsilon
-                        if recent_succ >= 0.15 and current_eps > self.cfg.min_epsilon:
+                        if recent_succ >= 0.20 and current_eps > self.cfg.min_epsilon:
                             new_eps = max(self.cfg.min_epsilon, current_eps * 0.98)
                             self.cfg.epsilon = new_eps
                             self.vec_env.set_epsilon(new_eps)
-                            print(f"  [Curriculum] High proficiency ({recent_succ*100:.1f}%). Tightened tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f} deg)")
+                            print(f"  [Curriculum +] High proficiency ({recent_succ*100:.1f}%). Tightened tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f}°)")
+                        elif recent_succ < 0.08 and current_eps < self.cfg.max_epsilon:
+                            new_eps = min(self.cfg.max_epsilon, current_eps * 1.02)
+                            self.cfg.epsilon = new_eps
+                            self.vec_env.set_epsilon(new_eps)
+                            print(f"  [Curriculum -] Low proficiency ({recent_succ*100:.1f}%). Relaxed tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f}°)")
+                        
+                    # Adaptive Bidirectional Curriculum on Goal Angle (Reachable Envelope)
+                    if self.cfg.curriculum_goal_angle:
+                        recent_succ = rollout_metrics["success_rate"]
+                        current_angle = self.cfg.max_goal_angle
+                        if recent_succ >= 0.20 and current_angle < self.cfg.target_max_goal_angle:
+                            new_angle = min(self.cfg.target_max_goal_angle, current_angle * 1.03)
+                            self.cfg.max_goal_angle = new_angle
+                            self.vec_env.set_max_goal_angle(new_angle)
+                            print(f"  [Curriculum +] High proficiency ({recent_succ*100:.1f}%). Expanded goal angle: {np.degrees(current_angle):.1f}° -> {np.degrees(new_angle):.1f}°")
+                        elif recent_succ < 0.08 and current_angle > self.cfg.min_goal_angle:
+                            new_angle = max(self.cfg.min_goal_angle, current_angle * 0.97)
+                            self.cfg.max_goal_angle = new_angle
+                            self.vec_env.set_max_goal_angle(new_angle)
+                            print(f"  [Curriculum -] Low proficiency ({recent_succ*100:.1f}%). Contracted goal angle: {np.degrees(current_angle):.1f}° -> {np.degrees(new_angle):.1f}°")
                         
                 if iteration % 25 == 0 or iteration == self.cfg.num_iterations:
                     self.save_checkpoint(os.path.join(output_dir, f"ppo_checkpoint_iter_{iteration}.pth"), iteration, rollout_metrics)
@@ -1417,10 +1502,17 @@ def parse_args():
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel MuJoCo environments (default: 8 for 10x-15x speedup; set to 1 for render mode)")
     parser.add_argument("--epsilon", type=float, default=0.35, help="Orientation success threshold in radians (default: 0.35 rad ~= 20 deg)")
+    parser.add_argument("--min_epsilon", type=float, default=0.28, help="Minimum epsilon threshold for curriculum in radians (default: 0.28 rad ~= 16.0 deg)")
+    parser.add_argument("--max_epsilon", type=float, default=0.40, help="Maximum epsilon threshold for curriculum in radians (default: 0.40 rad ~= 23.0 deg)")
+    parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Initial maximum target orientation angle in radians (default: 0.80 rad ~= 45.8 deg)")
+    parser.add_argument("--min_goal_angle", type=float, default=0.60, help="Minimum goal rotation angle floor in radians (default: 0.60 rad ~= 34.4 deg)")
+    parser.add_argument("--target_max_goal_angle", type=float, default=1.40, help="Target maximum goal angle in radians (default: 1.40 rad ~= 80.2 deg)")
+    parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum on epsilon (tightens when >20%%, relaxes when <8%%)")
+    parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
     parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
-    parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
-    parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive curriculum tightening on epsilon when success > 15%%")
-    parser.add_argument("--min_epsilon", type=float, default=0.20, help="Minimum epsilon threshold for curriculum in radians (default: 0.20 rad ~= 11.5 deg)")
+    parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
+    parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
+    parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30%% on mass, friction, size)")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
@@ -1470,10 +1562,18 @@ def main():
         target_kl=args.target_kl,
         initial_log_std=args.log_std,
         max_episode_steps=args.max_steps,
+        steps_per_radian=args.steps_per_radian,
+        bonus_steps_per_success=args.bonus_steps_per_success,
+        max_steps_cap=args.max_steps_cap,
         num_envs=num_envs,
         epsilon=args.epsilon,
-        curriculum_epsilon=args.curriculum_epsilon,
         min_epsilon=args.min_epsilon,
+        max_epsilon=args.max_epsilon,
+        curriculum_epsilon=args.curriculum_epsilon,
+        max_goal_angle=args.max_goal_angle,
+        min_goal_angle=args.min_goal_angle,
+        target_max_goal_angle=args.target_max_goal_angle,
+        curriculum_goal_angle=args.curriculum_goal_angle,
         w_progress=args.w_progress,
         w_action_rate=args.w_action_rate,
         render=args.render,

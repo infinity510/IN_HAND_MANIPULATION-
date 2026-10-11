@@ -277,4 +277,88 @@ python3 in_hand_manipulation/train_ppo.py \
   --output_dir checkpoints_ppo_extended
 ```
 
+---
+
+## 6. Multi-Core Vectorization & Intel Hybrid Architecture Optimization
+
+### The Problem:
+- Single-environment rollouts collected 2048 steps in ~25.0 seconds.
+- Worse, during PPO minibatch SGD updates, PyTorch defaulted to 16 threads across Intel Core Ultra 9 285H Performance (P) and Efficient (E) cores. Thread synchronization thrashing on small batch sizes (64) caused SGD updates to take **22.0 seconds per policy iteration**. Total iteration time: ~45 seconds.
+
+### The Solution:
+1. **Asynchronous Vectorized Environments (`SubprocVecEnv`):**
+   - Implemented multi-process isolated workers using `multiprocessing.Pipe` and `fork`.
+   - Spawns 12–15 parallel MuJoCo simulations.
+   - Rollout collection throughput surged from **80 steps/sec to 1,525+ steps/sec** (2048 steps in 1.34s).
+2. **Intra-Op Thread Clamping (`torch.set_num_threads(4)`):**
+   - Restricted PyTorch matrix operations to 4 threads, eliminating P/E-core synchronization overhead.
+   - SGD optimization time plummeted from **22.0s down to 0.11s** (a **200x speedup** on gradient updates).
+   - Overall iteration wall-clock time dropped from **~45s to 0.8s – 1.1s** (**30x overall speedup**). A 1000-iteration training run finishes in ~15 minutes instead of 7.5 hours.
+
+---
+
+## 7. Continuous In-Flight Goal Resampling & The Early-Termination Paradox
+
+### The Problem:
+- In classical RL, episodes terminate upon goal success.
+- In dexterous in-hand manipulation, terminating upon success creates a perverse incentive: an agent that achieves the goal at step 50 earns the $+10.0$ bonus but **loses 350 steps of positive step rewards** ($350 \times 1.5 = +525$). The policy learns that reaching the goal early is heavily penalized compared to holding the object forever!
+
+### The Solution:
+- **Continuous In-Flight Goal Resampling (OpenAI Dactyl Standard):**
+  - When $d_\theta < \epsilon$, the agent receives the $+10.0$ bonus, **immediately samples a new target quaternion in $SO(3)$**, and continues manipulating without interruption.
+  - `self.prev_d_theta` is immediately reset against the new target to prevent false artifact spikes in the differential progress reward:
+    $$r_{\text{progress}} = w_{\text{progress}} \cdot (d\theta_{t-1} - d\theta_t)$$
+  - Decoupled termination from success: `terminated = is_dropped`. Only true object drops trigger absorbing early termination.
+
+---
+
+## 8. The 180° $SO(3)$ Backflip Problem & Goal Distance Curriculum
+
+### The Problem:
+- Empirical analysis of rollouts revealed that the policy was consistently rotating the cube by **$15^\circ - 30^\circ$ toward the target**.
+- However, `_sample_target_quat()` was picking uniform random rotations across the entire $SO(3)$ sphere (`Rotation.random()`), with an average starting distance of **$124^\circ$ (and up to $177^\circ$)**.
+- If a target is $124^\circ$ away and the robot turns it by $25^\circ$, the remaining error is $99^\circ$. Since $99^\circ > 20^\circ$ ($\epsilon = 0.35\text{ rad}$), the environment never registered a success (`Succ: 0.0%`).
+
+### The Solution:
+- **Reachable Goal Angle Curriculum:**
+  - Sample target quaternions with bounded initial angular distance:
+    $$\theta \sim \mathcal{U}(\theta_{\text{min}}, \theta_{\text{max}}), \quad \theta_{\text{max}} = 0.80\text{ rad} \approx 45.8^\circ$$
+  - Because the robot already turns the cube by $25^\circ - 30^\circ$, starting $35^\circ - 45^\circ$ away immediately crosses the $\epsilon = 0.35$ rad ($20^\circ$) threshold.
+  - **Empirical Validation:** Upon implementing this reachable envelope, benchmark evaluation on `ppo_best_actor.pth` surged to **55.0% success rate, 18 goals scored across 20 episodes, and 0.0% drops**.
+
+---
+
+## 9. The "One-Way Ratchet" Trap & Bidirectional Adaptive Curriculum
+
+### The Problem:
+- When success rate surged to 66% early in training, a naive one-way curriculum tightened $\epsilon$ down to $0.20$ rad ($11.4^\circ$) and expanded goal angle to $3.14$ rad ($180^\circ$).
+- Once the task became 5x harder, the success rate dropped to 2%, but the one-way curriculum **never backed off**, stranding the policy in "impossible mode."
+
+### The Solution:
+- **Bidirectional Adaptive Curriculum:**
+  - **When Proficient ($\ge 20\%$ success):**
+    - Tighten tolerance $\epsilon$ by 2% down to realistic floor `min_epsilon = 0.28 rad` ($16.0^\circ$).
+    - Expand goal angle by 3% up to ceiling `target_max_goal_angle = 1.40 rad` ($80.2^\circ$, matching the BC dataset envelope).
+  - **When Struggling ($< 8\%$ success):**
+    - Relax tolerance $\epsilon$ by 2% up to ceiling `max_epsilon = 0.40 rad` ($23.0^\circ$) to restore positive reinforcement.
+    - Contract goal angle by 3% down to floor `min_goal_angle = 0.60 rad` ($34.4^\circ$) to keep the agent in its proximal zone of development (ZPD).
+
+---
+
+## 10. Dynamic Horizon Scaling & Success Bonus Time Extensions
+
+### The Problem:
+- A rigid 400-step (8.0s) horizon means that while an easy $30^\circ$ rotation has plenty of time, an $80^\circ$ rotation runs out of time mid-rotation and registers as an artificial failure.
+
+### The Solution:
+1. **Angle-Proportional Base Budgeting:**
+   $$\text{max\_steps} = \text{base\_steps} + (\text{steps\_per\_radian} \times \theta_{\text{initial}})$$
+   - Small $15^\circ$ rotation: $\approx 300\text{ steps}$ ($6.0\text{s}$).
+   - Medium $45^\circ$ rotation: $\approx 410\text{ steps}$ ($8.2\text{s}$).
+   - Large $80^\circ$ rotation: $\approx 530\text{ steps}$ ($10.6\text{s}$).
+2. **Success Time Extension (OpenAI Dactyl Standard):**
+   $$\text{current\_max\_steps} = \min(\text{max\_steps\_cap}, \text{current\_max\_steps} + \mathbf{150\text{ bonus steps}})$$
+   - Proficient policies that reach goals earn $+150$ extra steps ($+3.0\text{s}$) per goal, unlocking continuous multi-goal chaining (up to an 800-step / 16.0s ceiling).
+   - Failing policies terminate promptly at ~300 steps, preserving training throughput.
+
 

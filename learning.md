@@ -593,6 +593,62 @@ $$\epsilon_{\text{eval}}(\theta) = \max\left(0.015\text{ rad } (0.86^\circ), \, 
 - **Evaluation Precision Validated:** Both `evaluate_ppo.py` and `evaluate_bc.py` support `--success_ratio 0.10` and explicitly print target angle, dynamic threshold, and final error.
 
 
+## 18. Effective Manipulation Index (EMI) & Adaptive Proportional Epsilon Curriculum
+
+### 1. Shortcomings of the Heuristic Composite Performance Index (CPI)
+Previously, model checkpointing in `train_ppo.py` relied on an unnormalized linear combination:
+$$\text{CPI} = (\text{Success Rate} \times 100) - (0.5 \times \text{Mean Error}^\circ) - (0.5 \times \text{Drop Rate} \times 100)$$
+
+While serviceable as an early telemetry heuristic, CPI exhibited several theoretical and practical flaws:
+1. **Dimensional Inconsistency:** Mixed percentages ($0-100\%$) with geodesic angles in degrees ($0-180^\circ$) using arbitrary hand-tuned weights ($0.5$).
+2. **Curriculum Inversion:** When an adaptive curriculum contracted the tolerance threshold $\epsilon$ (demanding higher rotational accuracy), the binary success rate naturally dipped temporarily. Under CPI, this penalization caused the checkpointing system to reject genuinely superior, higher-precision policies in favor of earlier, coarser checkpoints.
+3. **Scale Invariance Failure:** A policy rotating an ambitious $80^\circ$ target down to $22^\circ$ (a $72.5\%$ reduction) was scored worse by CPI than a policy that took a simple $20^\circ$ target down to $18^\circ$ (a mere $10\%$ reduction), simply because $22^\circ > 18^\circ$.
+
+---
+
+### 2. The Effective Manipulation Index (EMI): Physically Grounded Objective
+To eliminate scale bias and curriculum inversion, we introduce the **Effective Manipulation Index (EMI)** $\in [0.0, 1.0]$:
+
+$$\text{EMI} = \mathcal{R} \times \mathcal{C}$$
+
+Where:
+- **$\mathcal{R}$ is Grasp Retention Rate:**
+  $$\mathcal{R} = 1 - \text{Drop Rate} \in [0.0, 1.0]$$
+- **$\mathcal{C}$ is Rotational Closure:**
+  $$\mathcal{C} = \max\left(0.0, \, 1.0 - \frac{d_\theta(\text{final})}{d_\theta(\text{initial})}\right) \in [0.0, 1.0]$$
+
+#### Behavioral Guarantees of EMI:
+| Behavior Mode | Retention $\mathcal{R}$ | Closure $\mathcal{C}$ | Resulting EMI | Outcome |
+| :--- | :---: | :---: | :---: | :--- |
+| **Passive Clamping (No motion)** | $1.0$ (No drops) | $0.0$ ($d_\theta$ unchanged) | **$0.00$** | **Rejected** (Cannot cheat by holding still) |
+| **Wild Thrashing / Dropping** | $0.0$ (Dropped) | Arbitrary | **$0.00$** | **Rejected** (Instant absorbing failure) |
+| **Coarse Turning (50% closed, 20% drops)** | $0.80$ | $0.50$ | **$0.40$** | Moderate baseline |
+| **Dexterous Regrasping (85% closed, 5% drops)**| $0.95$ | $0.85$ | **$0.81$** | **Selected as Best Model** |
+
+---
+
+### 3. Adaptive Proportional Epsilon Curriculum ($x \in [3\%, 25\%]$)
+Rather than a static degree threshold (e.g., $20^\circ$), the orientation success threshold $\epsilon$ is dynamically defined as a proportional ratio $x$ of the commanded initial angle:
+
+$$\epsilon(t) = \max\left(0.015\text{ rad } (0.86^\circ), \, x \times d_\theta(\text{initial})\right)$$
+
+- **Initial Ratio Floor / Ceiling:** Starts at $x = 25\%$ ($0.25$) and adaptively contracts down to $x = 3\%$ ($0.03$).
+- **Curriculum Transition Dynamics:**
+  - **Proficiency Step ($\mathcal{C} \ge 60\%$, $\text{Drop} \le 15\%$):** $x \leftarrow \max(0.03, x \times 0.985)$. Smoothly tightens orientation tolerance by $1.5\%$ per iteration.
+  - **Recovery Step ($\mathcal{C} < 35\%$ or $\text{Drop} > 30\%$):** $x \leftarrow \min(0.25, x \times 1.015)$. Gently relaxes tolerance to allow the policy to stabilize before advancing.
+- **Physical Feasibility Floor ($0.015\text{ rad} \approx 0.86^\circ$):** Prevents infinitesimal numerical limits on small rotations below MuJoCo contact simulation precision.
+
+---
+
+### 4. Preservation of Dual-Network State (Critic & Optimizers)
+When saving and resuming checkpoints (`ppo_best_actor.pth`, `ppo_latest_actor.pth`, periodic milestones):
+- **Actor State:** Weights and exploration variance parameter `log_std`.
+- **Critic State:** `critic_state_dict` fully serialized and reloaded upon restart, preserving learned value baselines.
+- **Adam Optimizer States:** Both `actor_optimizer_state_dict` and `critic_optimizer_state_dict` are persisted, preserving momentum and second-moment variance vectors across training sessions.
+- **Critic Warm-Up:** When fine-tuning from a converged PPO checkpoint, `--warmup_iters 10` is used to allow the Critic value network to realign with any modified reward formulations without disturbing Actor policy weights.
+
+
+
 
 
 

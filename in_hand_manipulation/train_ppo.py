@@ -85,7 +85,9 @@ class RewardWeights:
     w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
     w6: float = 0.05    # Proportional contact reward: encourages multi-fingered contact points (n_c)
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
-    epsilon: float = 0.35           # Target orientation error threshold in radians (~20.0 degrees)
+    epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
+    epsilon_ratio: float = 0.25     # Target orientation error threshold as ratio of initial angle (e.g. 0.25 = 25%)
+    min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
     drop_threshold: float = 0.20   # Distance threshold from palm center in meters (spawns at 0.10m, envelope extends to ~0.15m)
     min_height_threshold: float = 0.02 # Object height floor: true drop below gripper palm level
 
@@ -126,10 +128,13 @@ class PPOConfig:
     steps_per_radian: int = 200     # Additional episode steps granted per radian of required rotation (~3.5 steps/deg)
     bonus_steps_per_success: int = 150 # Additional episode steps granted per goal orientation achieved (OpenAI Dactyl)
     max_steps_cap: int = 800        # Hard maximum horizon ceiling in steps (800 steps = 16.0s at 50Hz)
-    epsilon: float = 0.35           # Goal orientation tolerance in radians (~20.0 degrees)
-    curriculum_epsilon: bool = False # If True, adaptively tightens/relaxes epsilon based on proficiency
-    min_epsilon: float = 0.28        # Precision floor in radians (~16.0 degrees, prevents impossible mode)
-    max_epsilon: float = 0.40        # Upper tolerance ceiling in radians (~23.0 degrees)
+    epsilon: float = 0.35           # Fallback goal orientation tolerance in radians (~20.0 degrees)
+    epsilon_ratio: float = 0.25      # Target orientation error threshold as ratio of initial angle (default: 0.25 = 25%)
+    min_epsilon_ratio: float = 0.03  # Minimum threshold ratio floor (default: 0.03 = 3%)
+    max_epsilon_ratio: float = 0.25  # Maximum threshold ratio ceiling (default: 0.25 = 25%)
+    curriculum_epsilon: bool = False # If True, adaptively tightens/relaxes epsilon_ratio from 25% down to 3% based on proficiency
+    min_epsilon: float = 0.28        # Legacy absolute floor in radians (~16.0 degrees)
+    max_epsilon: float = 0.40        # Legacy absolute ceiling in radians (~23.0 degrees)
     max_goal_angle: float = 0.80     # Initial maximum goal rotation angle in radians (~45.8 degrees)
     min_goal_angle: float = 0.60     # Minimum goal rotation angle floor in radians (~34.4 degrees)
     target_max_goal_angle: float = 1.40 # Target max goal angle in radians (~80.2 degrees, matches BC demo envelope)
@@ -230,6 +235,8 @@ class DeltoInHandManipulationEnv:
         self.step_count = 0
         self.episode_successes = 0
         self.prev_d_theta = 0.0
+        self.initial_d_theta = 0.0
+        self.current_epsilon = self.reward_weights.epsilon
         self.prev_action = np.zeros(len(self.actuator_ids), dtype=np.float32)
         
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
@@ -242,6 +249,10 @@ class DeltoInHandManipulationEnv:
     def set_epsilon(self, epsilon: float):
         """Updates goal orientation tolerance epsilon in radians."""
         self.reward_weights.epsilon = float(epsilon)
+
+    def set_epsilon_ratio(self, ratio: float):
+        """Updates goal orientation tolerance ratio (e.g. 0.25 = 25% down to 0.03 = 3%)."""
+        self.reward_weights.epsilon_ratio = float(ratio)
 
     def _sample_target_quat(self) -> np.ndarray:
         """
@@ -378,6 +389,8 @@ class DeltoInHandManipulationEnv:
         obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object_id}_joint").id]
         cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
         self.prev_d_theta = self.compute_angular_distance(cur_obj_quat, self.target_quat)
+        self.initial_d_theta = float(self.prev_d_theta)
+        self.current_epsilon = max(self.reward_weights.min_abs_epsilon, self.reward_weights.epsilon_ratio * self.initial_d_theta)
         self.prev_action = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
         
         # Quadratic Angle-Dependent Episode Horizon:
@@ -398,6 +411,7 @@ class DeltoInHandManipulationEnv:
             "target_quat": self.target_quat.copy(),
             "phys_params": self.current_phys_params.copy(),
             "initial_angle_deg": float(np.degrees(theta_rad)),
+            "current_epsilon": self.current_epsilon,
             "max_steps": self.current_max_steps,
         }
         return obs, info
@@ -510,7 +524,7 @@ class DeltoInHandManipulationEnv:
         n_c = self.count_contacts()
         
         # 5. Evaluate Indicator Functions & Continuous Goal Resampling
-        is_success_this_step = bool(d_theta < w.epsilon)
+        is_success_this_step = bool(d_theta < self.current_epsilon)
         is_dropped = bool(dist_to_palm > w.drop_threshold or obj_pos[2] < w.min_height_threshold)
         
         term_success_bonus = 0.0
@@ -523,6 +537,8 @@ class DeltoInHandManipulationEnv:
             self.target_quat = self._sample_target_quat()
             # Reset prev_d_theta against new goal so progress is accurately tracked for next step
             self.prev_d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
+            self.initial_d_theta = float(self.prev_d_theta)
+            self.current_epsilon = max(w.min_abs_epsilon, w.epsilon_ratio * self.initial_d_theta)
             # OpenAI Dactyl Success Time Extension:
             # Grants extra time per goal achieved so proficient policies can chain consecutive goals
             self.current_max_steps = min(
@@ -553,9 +569,13 @@ class DeltoInHandManipulationEnv:
         terminated = is_dropped
         truncated = (self.step_count >= self.current_max_steps)
         
+        rot_closure = max(0.0, 1.0 - (d_theta / (self.initial_d_theta + 1e-6)))
         next_obs = self._get_observation()
         info = {
             "d_theta": d_theta,
+            "initial_d_theta": self.initial_d_theta,
+            "current_epsilon": self.current_epsilon,
+            "rotational_closure": rot_closure,
             "dist_to_palm": dist_to_palm,
             "contacts": n_c,
             "is_success": (self.episode_successes > 0),
@@ -630,6 +650,10 @@ class DummyVecEnv:
         for env in self.envs:
             env.reward_weights.epsilon = float(epsilon)
 
+    def set_epsilon_ratio(self, ratio: float):
+        for env in self.envs:
+            env.set_epsilon_ratio(float(ratio))
+
     def set_max_goal_angle(self, max_angle: float):
         for env in self.envs:
             env.set_max_goal_angle(float(max_angle))
@@ -681,6 +705,9 @@ class SubprocVecEnv:
             elif cmd == "set_epsilon":
                 env.reward_weights.epsilon = float(data)
                 pipe.send(True)
+            elif cmd == "set_epsilon_ratio":
+                env.set_epsilon_ratio(float(data))
+                pipe.send(True)
             elif cmd == "set_max_goal_angle":
                 env.set_max_goal_angle(float(data))
                 pipe.send(True)
@@ -713,6 +740,12 @@ class SubprocVecEnv:
     def set_epsilon(self, epsilon: float):
         for p in self.pipes:
             p.send(("set_epsilon", float(epsilon)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_epsilon_ratio(self, ratio: float):
+        for p in self.pipes:
+            p.send(("set_epsilon_ratio", float(ratio)))
         for p in self.pipes:
             p.recv()
 
@@ -1014,6 +1047,7 @@ class TrainingLogger:
         self.jsonl_path = os.path.join(log_dir, "metrics.jsonl")
         self.fieldnames = [
             "iteration", "ep_return", "step_reward", "ep_length", "success_rate", "drop_rate",
+            "retention_rate", "rotational_closure", "emi_score", "epsilon_ratio",
             "mean_error_deg", "composite_score",
             "loss_critic", "loss_actor", "entropy", "clip_fraction",
             "approx_kl", "log_std", "elapsed_sec"
@@ -1077,6 +1111,8 @@ class PPOFineTuner:
                 obs_std=self.obs_std,
                 reward_weights=RewardWeights(
                     epsilon=self.cfg.epsilon,
+                    epsilon_ratio=self.cfg.epsilon_ratio,
+                    min_abs_epsilon=0.015,
                     w_progress=self.cfg.w_progress,
                     w_action_rate=self.cfg.w_action_rate,
                     w4=self.cfg.w4,
@@ -1103,6 +1139,7 @@ class PPOFineTuner:
         self.recent_successes = deque(maxlen=50)
         self.recent_drops = deque(maxlen=50)
         self.recent_errors_deg = deque(maxlen=50)
+        self.recent_closures = deque(maxlen=50)
         self.ep_returns = np.zeros(self.cfg.num_envs, dtype=np.float32)
         self.ep_lengths = np.zeros(self.cfg.num_envs, dtype=np.int32)
 
@@ -1230,6 +1267,8 @@ class PPOFineTuner:
                     self.recent_drops.append(1.0 if infos[env_idx].get("is_dropped", False) else 0.0)
                     err_deg = float(infos[env_idx].get("d_theta", 0.0)) * (180.0 / np.pi)
                     self.recent_errors_deg.append(err_deg)
+                    closure = float(infos[env_idx].get("rotational_closure", 0.0))
+                    self.recent_closures.append(closure)
                     self.ep_returns[env_idx] = 0.0
                     self.ep_lengths[env_idx] = 0
             
@@ -1259,9 +1298,14 @@ class PPOFineTuner:
         mean_err_deg = float(np.mean(self.recent_errors_deg)) if self.recent_errors_deg else (float(np.mean(step_errors)) if step_errors else 0.0)
         succ_rate = float(np.mean(self.recent_successes)) if self.recent_successes else 0.0
         drop_rate = float(np.mean(self.recent_drops)) if self.recent_drops else 0.0
+        mean_closure = float(np.mean(self.recent_closures)) if self.recent_closures else 0.0
+        retention_rate = max(0.0, 1.0 - drop_rate)
         
-        # Composite Performance Index (CPI):
-        # Rewards success rate (+1.0 per %), penalizes angular error (-0.5 per deg) and drops (-0.5 per %)
+        # Effective Manipulation Index (EMI):
+        # Physically grounded objective combining grasp retention (1 - Drop) and rotational closure (1 - theta_f / theta_0)
+        emi_score = retention_rate * mean_closure
+        
+        # Composite Performance Index (CPI legacy metric for backward compatibility)
         composite_score = (succ_rate * 100.0) - (0.5 * mean_err_deg) - (0.5 * drop_rate * 100.0)
         
         metrics = {
@@ -1270,6 +1314,10 @@ class PPOFineTuner:
             "ep_length": float(np.mean(self.recent_lengths)) if self.recent_lengths else float(np.mean(self.ep_lengths)),
             "success_rate": succ_rate,
             "drop_rate": drop_rate,
+            "retention_rate": retention_rate,
+            "rotational_closure": mean_closure,
+            "emi_score": emi_score,
+            "epsilon_ratio": self.cfg.epsilon_ratio,
             "mean_error_deg": mean_err_deg,
             "composite_score": composite_score,
         }
@@ -1407,9 +1455,11 @@ class PPOFineTuner:
         print("="*75 + "\n")
         
         obs = self.vec_env.reset()
+        best_emi_score = -1.0
         best_composite_score = -float('inf')
         best_success_rate = 0.0
         best_mean_error = float('inf')
+        best_closure = 0.0
         best_ep_return = -float('inf')
         start_time = time.time()
         
@@ -1435,6 +1485,10 @@ class PPOFineTuner:
                     "ep_length": rollout_metrics["ep_length"],
                     "success_rate": rollout_metrics["success_rate"],
                     "drop_rate": rollout_metrics["drop_rate"],
+                    "retention_rate": rollout_metrics["retention_rate"],
+                    "rotational_closure": rollout_metrics["rotational_closure"],
+                    "emi_score": rollout_metrics["emi_score"],
+                    "epsilon_ratio": rollout_metrics["epsilon_ratio"],
                     "mean_error_deg": rollout_metrics["mean_error_deg"],
                     "composite_score": rollout_metrics["composite_score"],
                     "loss_critic": update_metrics["loss_critic"],
@@ -1451,32 +1505,36 @@ class PPOFineTuner:
                 kl_flag = " (KL stopped)" if update_metrics.get("kl_early_stopped", False) else ""
                 print(
                     f"Iter {iteration:03d}/{self.cfg.num_iterations:03d} {phase_tag:<18} | "
-                    f"EpRet: {rollout_metrics['ep_return']:7.1f} | "
-                    f"Succ: {rollout_metrics['success_rate']*100:5.1f}% | "
-                    f"Drop: {rollout_metrics['drop_rate']*100:5.1f}% | "
+                    f"EMI: {rollout_metrics['emi_score']:.3f} | "
+                    f"Clos: {rollout_metrics['rotational_closure']*100:4.1f}% | "
+                    f"Succ: {rollout_metrics['success_rate']*100:4.1f}% | "
+                    f"Drop: {rollout_metrics['drop_rate']*100:4.1f}% | "
                     f"Err: {rollout_metrics['mean_error_deg']:4.1f}° | "
-                    f"Score: {rollout_metrics['composite_score']:+5.1f} | "
+                    f"EpsR: {rollout_metrics['epsilon_ratio']*100:4.1f}% | "
                     f"CritLoss: {update_metrics['loss_critic']:6.4f} | "
                     f"KL: {update_metrics['approx_kl']:.4f}{kl_flag} | "
                     f"Time: {elapsed:4.1f}s"
                 )
                 
-                # Model Checkpointing governed by Composite Performance Index (CPI)
-                # Combines Success Rate (+), Angular Error Reduction (-), and Grasp Retention (-)
+                # Model Checkpointing governed by Effective Manipulation Index (EMI)
+                # EMI = Retention Rate (1 - Drop) * Rotational Closure (1 - final_d_theta / init_d_theta)
                 if not is_warmup:
-                    comp_score = rollout_metrics["composite_score"]
-                    if comp_score > best_composite_score:
-                        best_composite_score = comp_score
+                    emi = rollout_metrics["emi_score"]
+                    if emi > best_emi_score:
+                        best_emi_score = emi
+                        best_composite_score = rollout_metrics["composite_score"]
                         best_success_rate = rollout_metrics["success_rate"]
                         best_mean_error = rollout_metrics["mean_error_deg"]
+                        best_closure = rollout_metrics["rotational_closure"]
                         self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
                         print(
-                            f"  --> [NEW BEST MODEL SAVED] Score: {comp_score:+.2f} | "
+                            f"  --> [NEW BEST MODEL SAVED] EMI: {emi:.4f} | "
+                            f"Closure: {rollout_metrics['rotational_closure']*100:.1f}% | "
                             f"Succ: {rollout_metrics['success_rate']*100:.1f}% | "
-                            f"Err: {rollout_metrics['mean_error_deg']:.1f}° | "
-                            f"Drop: {rollout_metrics['drop_rate']*100:.1f}%"
+                            f"Drop: {rollout_metrics['drop_rate']*100:.1f}% | "
+                            f"Err: {rollout_metrics['mean_error_deg']:.1f}°"
                         )
-                    elif best_composite_score == -float('inf') and rollout_metrics["ep_return"] > best_ep_return:
+                    elif best_emi_score < 0 and rollout_metrics["ep_return"] > best_ep_return:
                         best_ep_return = rollout_metrics["ep_return"]
                         self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
                     
@@ -1484,20 +1542,22 @@ class PPOFineTuner:
                     if iteration % 5 == 0 or iteration == self.cfg.num_iterations:
                         self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
                         
-                    # Adaptive Bidirectional Curriculum on Epsilon (Orientation Precision)
+                    # Adaptive Bidirectional Curriculum on Proportional Epsilon Ratio (x% of angle)
                     if self.cfg.curriculum_epsilon:
-                        recent_succ = rollout_metrics["success_rate"]
-                        current_eps = self.cfg.epsilon
-                        if recent_succ >= 0.20 and current_eps > self.cfg.min_epsilon:
-                            new_eps = max(self.cfg.min_epsilon, current_eps * 0.98)
-                            self.cfg.epsilon = new_eps
-                            self.vec_env.set_epsilon(new_eps)
-                            print(f"  [Curriculum +] High proficiency ({recent_succ*100:.1f}%). Tightened tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f}°)")
-                        elif recent_succ < 0.08 and current_eps < self.cfg.max_epsilon:
-                            new_eps = min(self.cfg.max_epsilon, current_eps * 1.02)
-                            self.cfg.epsilon = new_eps
-                            self.vec_env.set_epsilon(new_eps)
-                            print(f"  [Curriculum -] Low proficiency ({recent_succ*100:.1f}%). Relaxed tolerance: {current_eps:.3f} -> {new_eps:.3f} rad ({np.degrees(new_eps):.1f}°)")
+                        recent_closure = rollout_metrics["rotational_closure"]
+                        current_ratio = self.cfg.epsilon_ratio
+                        # Tighten tolerance if closure >= 60% and drop rate <= 15%
+                        if recent_closure >= 0.60 and rollout_metrics["drop_rate"] <= 0.15 and current_ratio > self.cfg.min_epsilon_ratio:
+                            new_ratio = max(self.cfg.min_epsilon_ratio, current_ratio * 0.985)
+                            self.cfg.epsilon_ratio = new_ratio
+                            self.vec_env.set_epsilon_ratio(new_ratio)
+                            print(f"  [Curriculum +] High closure ({recent_closure*100:.1f}%). Tightened tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
+                        # Relax tolerance if closure < 35% or drop rate > 30%
+                        elif (recent_closure < 0.35 or rollout_metrics["drop_rate"] > 0.30) and current_ratio < self.cfg.max_epsilon_ratio:
+                            new_ratio = min(self.cfg.max_epsilon_ratio, current_ratio * 1.015)
+                            self.cfg.epsilon_ratio = new_ratio
+                            self.vec_env.set_epsilon_ratio(new_ratio)
+                            print(f"  [Curriculum -] Low closure ({recent_closure*100:.1f}%). Relaxed tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
                         
                     # Adaptive Bidirectional Curriculum on Goal Angle (Reachable Envelope)
                     if self.cfg.curriculum_goal_angle:
@@ -1526,7 +1586,7 @@ class PPOFineTuner:
         total_time = (time.time() - start_time) / 60.0
         print("\n" + "="*75)
         print(f"PPO FINE-TUNING FINISHED in {total_time:.2f} minutes!")
-        print(f"Best Composite Score: {best_composite_score:+.2f}")
+        print(f"Best EMI Score: {best_emi_score:.4f} | Best Closure: {best_closure*100:.1f}%")
         print(f"Best Success Rate: {best_success_rate * 100:.2f}% | Best Mean Error: {best_mean_error:.1f}°")
         print(f"Models saved in: {output_dir}")
         print("="*75)
@@ -1567,13 +1627,16 @@ def parse_args():
     parser.add_argument("--log_std", type=float, default=-2.8, help="Initial log std for Gaussian exploration (default: -2.8)")
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel MuJoCo environments (default: 8 for 10x-15x speedup; set to 1 for render mode)")
-    parser.add_argument("--epsilon", type=float, default=0.35, help="Orientation success threshold in radians (default: 0.35 rad ~= 20 deg)")
-    parser.add_argument("--min_epsilon", type=float, default=0.28, help="Minimum epsilon threshold for curriculum in radians (default: 0.28 rad ~= 16.0 deg)")
-    parser.add_argument("--max_epsilon", type=float, default=0.40, help="Maximum epsilon threshold for curriculum in radians (default: 0.40 rad ~= 23.0 deg)")
+    parser.add_argument("--epsilon", type=float, default=0.35, help="Fallback orientation success threshold in radians (default: 0.35 rad ~= 20 deg)")
+    parser.add_argument("--epsilon_ratio", type=float, default=0.25, help="Target orientation error threshold as ratio of initial angle (default: 0.25 = 25%%)")
+    parser.add_argument("--min_epsilon_ratio", type=float, default=0.03, help="Minimum epsilon ratio floor for curriculum (default: 0.03 = 3%%)")
+    parser.add_argument("--max_epsilon_ratio", type=float, default=0.25, help="Maximum epsilon ratio ceiling for curriculum (default: 0.25 = 25%%)")
+    parser.add_argument("--min_epsilon", type=float, default=0.28, help="Legacy minimum epsilon threshold for curriculum in radians (default: 0.28 rad ~= 16.0 deg)")
+    parser.add_argument("--max_epsilon", type=float, default=0.40, help="Legacy maximum epsilon threshold for curriculum in radians (default: 0.40 rad ~= 23.0 deg)")
     parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Initial maximum target orientation angle in radians (default: 0.80 rad ~= 45.8 deg)")
     parser.add_argument("--min_goal_angle", type=float, default=0.60, help="Minimum goal rotation angle floor in radians (default: 0.60 rad ~= 34.4 deg)")
     parser.add_argument("--target_max_goal_angle", type=float, default=1.40, help="Target maximum goal angle in radians (default: 1.40 rad ~= 80.2 deg)")
-    parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum on epsilon (tightens when >20%%, relaxes when <8%%)")
+    parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum contracting epsilon ratio from 25%% down to 3%% based on closure")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
     parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
@@ -1637,9 +1700,12 @@ def main():
         max_steps_cap=args.max_steps_cap,
         num_envs=num_envs,
         epsilon=args.epsilon,
+        epsilon_ratio=args.epsilon_ratio,
+        min_epsilon_ratio=args.min_epsilon_ratio,
+        max_epsilon_ratio=args.max_epsilon_ratio,
+        curriculum_epsilon=args.curriculum_epsilon,
         min_epsilon=args.min_epsilon,
         max_epsilon=args.max_epsilon,
-        curriculum_epsilon=args.curriculum_epsilon,
         max_goal_angle=args.max_goal_angle,
         min_goal_angle=args.min_goal_angle,
         target_max_goal_angle=args.target_max_goal_angle,

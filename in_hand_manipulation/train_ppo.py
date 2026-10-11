@@ -136,6 +136,7 @@ class PPOConfig:
     curriculum_goal_angle: bool = False # If True, adaptively expands/contracts max_goal_angle based on proficiency
     w_progress: float = 2.0          # Angular progress reward weight
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
+    w4: float = 10.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -1065,6 +1066,7 @@ class PPOFineTuner:
                     epsilon=self.cfg.epsilon,
                     w_progress=self.cfg.w_progress,
                     w_action_rate=self.cfg.w_action_rate,
+                    w4=self.cfg.w4,
                     w5=self.cfg.w5,
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
@@ -1513,6 +1515,7 @@ def parse_args():
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
     parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
+    parser.add_argument("--w4", type=float, default=10.0, help="Terminal success bonus weight (default: 10.0)")
     parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
@@ -1580,6 +1583,7 @@ def main():
         curriculum_goal_angle=args.curriculum_goal_angle,
         w_progress=args.w_progress,
         w_action_rate=args.w_action_rate,
+        w4=args.w4,
         w5=args.w5,
         render=args.render,
         show_actions=args.show_actions,

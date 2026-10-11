@@ -92,13 +92,13 @@ class PPOConfig:
     num_iterations: int = 250       # Total PPO policy iterations
     num_minibatches: int = 32       # Number of minibatches (e.g. 2048 / 32 = 64 batch size)
     mini_batch_size: int = 64       # Size of each SGD minibatch
-    ppo_epochs: int = 10            # Number of optimization epochs per rollout buffer
+    ppo_epochs: int = 5             # Number of optimization epochs per rollout buffer (tuned for fine-tuning stability)
     
     # Critic Warm-Up
-    warmup_iterations: int = 15     # Number of initial iterations where Actor is frozen
+    warmup_iterations: int = 30     # Number of initial iterations where Actor is frozen (increased to 30 for value calibration)
     
     # Optimization Learning Rates
-    actor_lr: float = 3e-5          # Conservative learning rate to preserve BC demonstration gaits
+    actor_lr: float = 2e-5          # Conservative learning rate to preserve BC demonstration gaits
     critic_lr: float = 3e-4         # Standard learning rate for value function fitting
     max_grad_norm: float = 0.5      # Gradient clipping threshold for stability
     
@@ -106,6 +106,7 @@ class PPOConfig:
     gamma: float = 0.99             # Discount factor
     gae_lambda: float = 0.95        # GAE bias-variance trade-off parameter
     clip_eps: float = 0.2           # PPO clipping parameter epsilon (can be 0.1 for tighter updates)
+    target_kl: Optional[float] = 0.02 # Early-stopping threshold on approx_kl (protects BC weights)
     value_coef: float = 0.5         # Critic loss weight c1
     entropy_coef: float = 0.001     # Entropy bonus weight c2
     initial_log_std: float = -2.3   # Explores safely near demonstrated gaits (sigma ~= 0.1 rad)
@@ -423,17 +424,26 @@ class DeltoInHandManipulationEnv:
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         
         # =====================================================================
-        # EXACT REWARD FORMULATION:
-        # r_t = - w1*(d_theta)
-        #       - w2*||a_t||^2
-        #       - w3*||qdot_t||^2
+        # EXACT REWARD FORMULATION (with Survival Baseline):
+        # r_t = w1 * (pi - d_theta)
+        #       - w2 * ||a_t||^2
+        #       - w3 * ||qdot_t||^2
         #       + w4 * I(d_theta < epsilon)
         #       - w5 * I(dist_to_palm > 0.12)
         #       + w6 * n_c
         #       - w7 * I(n_c == 0)
+        #
+        # Anti-Suicide Transformation:
+        # Formulating the angular term as w1 * (pi - d_theta) >= 0 is mathematically
+        # equivalent to: - w1 * d_theta + w1 * pi.
+        # The constant w1 * pi (+3.1416) acts as a per-step "alive bonus".
+        # While holding the cube, the agent earns positive return at every step.
+        # Dropping the cube immediately terminates the episode and forfeits all
+        # remaining positive rewards for the episode horizon, eliminating the
+        # failure mode where the policy learns to drop the object early.
         # =====================================================================
         reward = (
-            - (w.w1 * d_theta)
+            (w.w1 * (np.pi - d_theta))
             - (w.w2 * control_norm_sq)
             - (w.w3 * vel_norm_sq)
             + term_success_bonus
@@ -455,7 +465,7 @@ class DeltoInHandManipulationEnv:
             "is_success": is_success,
             "is_dropped": is_dropped,
             "reward_components": {
-                "angular_penalty": - (w.w1 * d_theta),
+                "angular_reward": (w.w1 * (np.pi - d_theta)),
                 "control_penalty": - (w.w2 * control_norm_sq),
                 "velocity_penalty": - (w.w3 * vel_norm_sq),
                 "success_bonus": term_success_bonus,
@@ -943,7 +953,13 @@ class PPOFineTuner:
         clip_fractions = []
         approx_kls = []
         
+        kl_early_stopped = False
+        epochs_completed = 0
+        
         for epoch in range(self.cfg.ppo_epochs):
+            if kl_early_stopped:
+                break
+            epochs_completed += 1
             for batch in self.buffer.get_minibatch_generator(batch_size=self.cfg.mini_batch_size, normalize_advantages=True):
                 b_obs = batch["obs"]
                 b_actions = batch["actions"]
@@ -989,6 +1005,11 @@ class PPOFineTuner:
                     clipped = (ratio < (1.0 - self.cfg.clip_eps)) | (ratio > (1.0 + self.cfg.clip_eps))
                     clip_fractions.append(clipped.float().mean().item())
                 
+                # Target KL early stopping: prevents destructive policy drift beyond trust region
+                if self.cfg.target_kl is not None and approx_kl > (1.5 * self.cfg.target_kl):
+                    kl_early_stopped = True
+                    break
+                
                 # Clipped Surrogate Objective:
                 # Surr1 = r_t(theta) * A_t
                 # Surr2 = clip(r_t(theta), 1 - eps, 1 + eps) * A_t
@@ -1017,6 +1038,8 @@ class PPOFineTuner:
             "entropy": float(np.mean(entropies)) if entropies else 0.0,
             "clip_fraction": float(np.mean(clip_fractions)) if clip_fractions else 0.0,
             "approx_kl": float(np.mean(approx_kls)) if approx_kls else 0.0,
+            "kl_early_stopped": kl_early_stopped,
+            "epochs_completed": epochs_completed,
         }
 
     def train(self, output_dir: str = "checkpoints_ppo"):
@@ -1068,6 +1091,7 @@ class PPOFineTuner:
             logger.log(log_record)
             
             # Console Output
+            kl_flag = " (KL stopped)" if update_metrics.get("kl_early_stopped", False) else ""
             print(
                 f"Iter {iteration:03d}/{self.cfg.num_iterations:03d} {phase_tag:<18} | "
                 f"EpRet: {rollout_metrics['ep_return']:7.1f} | "
@@ -1076,12 +1100,12 @@ class PPOFineTuner:
                 f"Drop: {rollout_metrics['drop_rate']*100:5.1f}% | "
                 f"CritLoss: {update_metrics['loss_critic']:6.4f} | "
                 f"ActLoss: {update_metrics['loss_actor']:6.4f} | "
-                f"KL: {update_metrics['approx_kl']:.4f} | "
+                f"KL: {update_metrics['approx_kl']:.4f}{kl_flag} | "
                 f"Time: {elapsed:4.1f}s"
             )
             
             # Model Checkpointing
-            if rollout_metrics["success_rate"] >= best_success_rate and not is_warmup:
+            if not is_warmup and rollout_metrics["success_rate"] > best_success_rate:
                 best_success_rate = rollout_metrics["success_rate"]
                 self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
                 
@@ -1122,13 +1146,14 @@ def parse_args():
     parser.add_argument("--iterations", type=int, default=250, help="Total PPO iterations")
     parser.add_argument("--rollout_steps", type=int, default=2048, help="Rollout buffer steps per iteration")
     parser.add_argument("--batch_size", type=int, default=64, help="Minibatch size for SGD updates")
-    parser.add_argument("--ppo_epochs", type=int, default=10, help="Epochs per rollout update")
-    parser.add_argument("--warmup_iters", type=int, default=15, help="Critic warm-up iterations (Actor frozen)")
-    parser.add_argument("--actor_lr", type=float, default=3e-5, help="Actor learning rate")
+    parser.add_argument("--ppo_epochs", type=int, default=5, help="Epochs per rollout update (default: 5)")
+    parser.add_argument("--warmup_iters", type=int, default=30, help="Critic warm-up iterations where Actor is frozen (default: 30)")
+    parser.add_argument("--actor_lr", type=float, default=2e-5, help="Actor learning rate (default: 2e-5)")
     parser.add_argument("--critic_lr", type=float, default=3e-4, help="Critic learning rate")
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO clipping epsilon")
+    parser.add_argument("--target_kl", type=float, default=0.02, help="Target KL divergence for early stopping (default: 0.02)")
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
-    parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30% by default on mass, friction, size)")
+    parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30%% on mass, friction, size)")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
     parser.add_argument("--checkpoint", type=str, default="", help="Path to bc_actor_checkpoint.pth")
@@ -1170,6 +1195,7 @@ def main():
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         clip_eps=args.clip_eps,
+        target_kl=args.target_kl,
         max_episode_steps=args.max_steps,
         render=args.render,
         show_actions=args.show_actions,

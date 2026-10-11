@@ -1510,6 +1510,7 @@ def parse_args():
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum on epsilon (tightens when >20%%, relaxes when <8%%)")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
     parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
+    parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")

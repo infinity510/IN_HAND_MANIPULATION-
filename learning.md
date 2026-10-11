@@ -707,7 +707,74 @@ During the 4,000-iteration Stage 1 fine-tuning run, `EpsR` remained locked at $2
    ```
 
 3. **Minibatch-Level KL Trust Region Guard:**
-   Evaluates `approx_kl` immediately after each minibatch update, halting backpropagation if `approx_kl > 1.5 * target_kl`, completely preventing policy divergence.
+
+## 21. Diagnosis & Resolution of 10k Iteration Stagnation: Actor Starvation & Reward Basin
+
+### 1. Empirical Findings & Diagnostic Failure Modes
+During an extended 8,900-iteration Stage 1 training run, the policy exhibited no progression in orientation success:
+- Success rate fluctuated between $10\%$ and $18\%$.
+- Proportional tolerance `EpsR` remained locked at $25.0\%$.
+- Drop rate steadily worsened to $40\% - 60\%$.
+- Headless evaluation of the checkpoint revealed **$0.0\%$ drops ($100\%$ retention)** and a static mean angular error of **$27.9^\circ \pm 8.0^\circ$**.
+
+### 2. Root Cause Analysis
+
+#### Root Cause 1: Premature Minibatch KL Abort (Actor Gradient Starvation)
+- **The Defect:** In `update_policy()`, an inner safety guard:
+  ```python
+  if approx_kl > (1.5 * self.cfg.target_kl):
+      kl_early_stopped = True
+      break
+  ```
+  was executed inside the 64-sample minibatch loop.
+- **The Mechanism:** With `target_kl = 0.025`, the threshold was $0.0375$. Because a 64-sample minibatch naturally exhibits stochastic variance in sample log-ratios, the check was tripped on the 1st or 2nd minibatch of epoch 0.
+- **The Consequence:** The break terminated the entire SGD epoch loop. Out of 160 updates ($5 \text{ epochs} \times 32 \text{ minibatches}$), the Actor received only **1 to 2 gradient updates per iteration** (console logged `Time: 0.6s - 0.7s` and `(KL stopped)` every iteration). Meanwhile, the Critic updated before the check, taking all 160 updates. Over 8,900 iterations, the Critic executed $\approx 1.42\text{ million}$ updates while the Actor was virtually frozen. This decoupled the value landscape, causing `CritLoss` to blow out to $200 - 727+$.
+- **The Architectural Fix:**
+  1. Removed the single-minibatch $0.0375$ abort.
+  2. Implemented an extreme numerical blowout guard for rogue minibatches:
+     ```python
+     if not is_warmup and approx_kl > 0.30:
+         continue
+     ```
+  3. Evaluated KL early stopping strictly at the **epoch level** across all minibatches (`mean_epoch_kl > 1.5 * target_kl`), matching CleanRL and OpenAI PPO standards.
+
+#### Root Cause 2: Risk-Averse Reward Clamping Basin at $28^\circ$
+- **The Defect:** The linear orientation reward $w_1 (\pi - d_\theta)$ provided insufficient gradient differential between $28^\circ$ ($\Delta r = 2.65$) and $5^\circ$ ($\Delta r = 3.05$).
+- **The Policy Trap:** Attempting to manipulate the cube beyond $28^\circ$ requires releasing and rolling fingertips across cube corners, risking a drop penalty of $-25.0$. The policy converged to a local optimum: clamping the cube tightly at $28^\circ$, maintaining all 3 fingertip contact points ($+0.15$ reward), and surviving all 500 steps without dropping to harvest $\approx +1,300$ episode return with zero drop risk.
+- **The Architectural Fix:**
+  Introduced a steep non-linear exponential precision guidance reward:
+  $$r_{\text{prec}} = w_{\text{prec}} \cdot \exp\left(-\frac{d_\theta}{0.20}\right)$$
+  - At $30^\circ$ ($0.52\text{ rad}$): $r_{\text{prec}} = +0.15$
+  - At $10^\circ$ ($0.17\text{ rad}$): $r_{\text{prec}} = +0.85$
+  - At $5^\circ$ ($0.087\text{ rad}$): $r_{\text{prec}} = +1.29$
+  - At $1^\circ$ ($0.017\text{ rad}$): $r_{\text{prec}} = +1.84$
+  This non-linear guidance pulls the policy out of the $28^\circ$ clamping basin by providing overwhelming reward incentives for tight millimeter alignment.
+
+---
+
+### 3. Workspace Cleanup & Retraining Blueprint
+- **Stale Run Logs & Actors Archived:** Moved `metrics.jsonl`, `progress.csv`, `ppo_best_actor.pth`, and `ppo_latest_actor.pth` to `checkpoints_ppo/archive_stale_run/`.
+- **Checkpoint Pruning:** Purged broken intermediate checkpoints `iter_250` through `iter_9000`, preserving the verified gold standard benchmark:
+  `checkpoints_ppo/ppo_checkpoint_iter_2000.pth` (80.0% success, 6.7% drop, 38.6° error).
+- **Execution Command for 10,000 Iterations Stage 1:**
+  Resumes from `ppo_checkpoint_iter_2000.pth` with full 16-core parallelism, balanced progress & precision rewards, and warm-up bypassed:
+  ```bash
+  python3 in_hand_manipulation/train_ppo.py \
+    --iterations 10000 \
+    --num_envs 16 \
+    --checkpoint checkpoints_ppo/ppo_checkpoint_iter_2000.pth \
+    --warmup_iters 0 \
+    --w_progress 4.0 \
+    --w_precision 2.0 \
+    --w4 25.0 \
+    --w5 25.0 \
+    --actor_lr 2e-5 \
+    --critic_lr 1e-4 \
+    --curriculum_epsilon \
+    --save_freq 250 \
+    --output_dir checkpoints_ppo
+  ```
+
 
 
 

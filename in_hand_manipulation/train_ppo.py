@@ -78,6 +78,7 @@ class RewardWeights:
     """
     w1: float = 1.0     # Angular distance penalty weight: penalizes rotational error d_theta
     w_progress: float = 2.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
+    w_precision: float = 2.0 # Exponential precision guidance reward weight: non-linear gradient pulling policy out of 28 deg basin
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
     w_action_rate: float = 0.002 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
@@ -140,6 +141,7 @@ class PPOConfig:
     target_max_goal_angle: float = 1.40 # Target max goal angle in radians (~80.2 degrees, matches BC demo envelope)
     curriculum_goal_angle: bool = False # If True, adaptively expands/contracts max_goal_angle based on proficiency
     w_progress: float = 2.0          # Angular progress reward weight
+    w_precision: float = 2.0         # Exponential precision guidance reward weight
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     w4: float = 10.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
@@ -506,6 +508,13 @@ class DeltoInHandManipulationEnv:
         angular_progress = float(self.prev_d_theta - d_theta)
         progress_reward = w.w_progress * angular_progress
         
+        # (a3) Exponential Precision Guidance Reward: non-linear gradient pulling out of 28 deg basin
+        # At 30 deg (~0.52 rad): exp(-0.52/0.20) = exp(-2.6) = 0.074 -> +0.15
+        # At 10 deg (~0.17 rad): exp(-0.17/0.20) = exp(-0.85) = 0.427 -> +0.85
+        # At 5 deg (~0.087 rad): exp(-0.087/0.20) = exp(-0.435) = 0.647 -> +1.29
+        # At 1 deg (~0.017 rad): exp(-0.017/0.20) = exp(-0.085) = 0.919 -> +1.84
+        precision_reward = w.w_precision * float(np.exp(-d_theta / 0.20))
+        
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
         
@@ -554,6 +563,7 @@ class DeltoInHandManipulationEnv:
         reward = (
             (w.w1 * (np.pi - d_theta))
             + progress_reward
+            + precision_reward
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - (w.w3 * vel_norm_sq)
@@ -1121,6 +1131,7 @@ class PPOFineTuner:
                     epsilon_ratio=self.cfg.epsilon_ratio,
                     min_abs_epsilon=0.015,
                     w_progress=self.cfg.w_progress,
+                    w_precision=self.cfg.w_precision,
                     w_action_rate=self.cfg.w_action_rate,
                     w4=self.cfg.w4,
                     w5=self.cfg.w5,
@@ -1409,10 +1420,9 @@ class PPOFineTuner:
                     clipped = (ratio < (1.0 - self.cfg.clip_eps)) | (ratio > (1.0 + self.cfg.clip_eps))
                     clip_fractions.append(clipped.float().mean().item())
                 
-                # Immediate KL safety guard: abort if policy drifts beyond trust region
-                if not is_warmup and self.cfg.target_kl is not None and approx_kl > (1.5 * self.cfg.target_kl):
-                    kl_early_stopped = True
-                    break
+                # Extreme numerical blowout guard: skip minibatch if gradient or ratio explodes
+                if not is_warmup and approx_kl > 0.30:
+                    continue
                 
                 # Clipped Surrogate Objective:
                 # Surr1 = r_t(theta) * A_t
@@ -1653,6 +1663,7 @@ def parse_args():
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum contracting epsilon ratio from 25%% down to 3%% based on closure")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
     parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
+    parser.add_argument("--w_precision", type=float, default=2.0, help="Exponential precision guidance reward weight (default: 2.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
     parser.add_argument("--w4", type=float, default=10.0, help="Terminal success bonus weight (default: 10.0)")
     parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
@@ -1725,6 +1736,7 @@ def main():
         target_max_goal_angle=args.target_max_goal_angle,
         curriculum_goal_angle=args.curriculum_goal_angle,
         w_progress=args.w_progress,
+        w_precision=args.w_precision,
         w_action_rate=args.w_action_rate,
         w4=args.w4,
         w5=args.w5,

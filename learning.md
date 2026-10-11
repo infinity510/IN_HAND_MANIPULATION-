@@ -532,6 +532,39 @@ $$\text{CPI} = (\text{Success Rate} \times 100) - 0.5 \times (\text{Mean Error (
 - Added `--save_freq` CLI flag (default: 100 iterations) to avoid disk bloat.
 
 
+## 16. Quadratic Angle-Dependent Episode Horizon & Dynamic Visual Target Arrows
+
+### 1. Physical Rationale for Quadratic Episode Horizon:
+In multi-fingered in-hand manipulation, the time required to reorient an object does not scale linearly:
+- **Small Rotations ($\theta < 20^\circ$):** Achieved within the static contact deformation of a single tripod grasp without breaking finger contact ($\sim 220 - 250\text{ steps} \approx 4.5 - 5.0\text{s}$).
+- **Large Rotations ($\theta > 60^\circ - 90^\circ$):** Require breaking and re-establishing multi-point frictional contacts, finger gaiting, and iterative slip-control cycles. The number of sequential regrasp transitions scales non-linearly with rotational displacement.
+
+We implemented the quadratic horizon formula across the environment and evaluation pipelines:
+$$\text{Horizon Steps}(\theta) = \min\left(800, \text{int}\left(200 + 150 \cdot \theta + 150 \cdot \theta^2\right)\right)$$
+
+| Target Angle ($\theta$) | Linear Contribution | Quadratic Contribution | Total Allocated Steps | Real-Time Horizon |
+| :---: | :---: | :---: | :---: | :---: |
+| $15.0^\circ$ ($0.26\text{ rad}$) | $+39$ steps | $+10$ steps | **$249$ steps** | $4.98\text{ seconds}$ |
+| $45.0^\circ$ ($0.79\text{ rad}$) | $+118$ steps | $+94$ steps | **$412$ steps** | $8.24\text{ seconds}$ |
+| $75.0^\circ$ ($1.31\text{ rad}$) | $+196$ steps | $+257$ steps | **$653$ steps** | $13.06\text{ seconds}$ |
+| $90.0^\circ$ ($1.57\text{ rad}$) | $+236$ steps | $+370$ steps | **$800$ steps (Capped)** | $16.00\text{ seconds}$ |
+
+### 2. Real-Time 3D Green Target Arrow Visualization:
+Integrated a dynamic visual target marker into MuJoCo's runtime user scene (`viewer.user_scn`):
+- Uses `mujoco.mjv_initGeom(geom, mjGEOM_ARROW, size, pos, mat, rgba)`.
+- Renders a vibrant green 3D arrow hovering directly above the object ($+0.08\text{m}$ along world Z).
+- Rotates dynamically in real time to match the exact target orientation frame $R(\mathbf{q}_{\text{target}})$, giving clear visual feedback of the goal pose during live playback.
+
+### 3. Inter-Episode Settling Delay (1.0 Second):
+- Added an active $1.0\text{s}$ pause at the completion of each trajectory.
+- In interactive viewer mode, continues rendering and syncing the final achieved state and the target arrow, allowing the user to observe the final alignment before the next trajectory resets.
+
+### 4. Code Modernization & Bloat Elimination:
+- **`evaluate_ppo.py`**: Unified render and non-render loops into a single clean pipeline, eliminating duplicate episode stepping code.
+- **`evaluate_bc.py`**: Completely overhauled from hardcoded 5-second timers; eliminated dead `pynput` keyboard hooks; added full metric tracking (success rate, drop rate, mean error, steps), quadratic horizon, target arrows, and headless `--no_render` support.
+
+
+
 
 
 

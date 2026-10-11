@@ -376,18 +376,25 @@ class DeltoInHandManipulationEnv:
         self.prev_d_theta = self.compute_angular_distance(cur_obj_quat, self.target_quat)
         self.prev_action = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
         
-        # Angle-Proportional Episode Horizon:
-        # Scales episode steps with required rotation angle so agent has proportional time for larger rotations
-        self.current_max_steps = min(
-            self.max_steps_cap,
-            int(self.base_episode_steps + self.steps_per_radian * self.prev_d_theta)
+        # Quadratic Angle-Dependent Episode Horizon:
+        # Scales episode steps quadratically with required rotation angle:
+        # Small rotations (~15-20 deg) complete in a single contact adjustment (~250 steps / 5.0s),
+        # while large rotations (~60-90+ deg) require multi-phase regrasps and gaiting cycles (~500-800 steps / 10-16s).
+        theta_rad = float(self.prev_d_theta)
+        quad_steps = int(
+            self.base_episode_steps
+            + self.steps_per_radian * theta_rad
+            + 150.0 * (theta_rad ** 2)
         )
+        self.current_max_steps = min(self.max_steps_cap, quad_steps)
             
         obs = self._get_observation()
         info = {
             "object_id": self.active_object_id,
             "target_quat": self.target_quat.copy(),
-            "phys_params": self.current_phys_params.copy()
+            "phys_params": self.current_phys_params.copy(),
+            "initial_angle_deg": float(np.degrees(theta_rad)),
+            "max_steps": self.current_max_steps,
         }
         return obs, info
 

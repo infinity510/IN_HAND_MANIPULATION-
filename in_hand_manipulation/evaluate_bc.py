@@ -1,83 +1,112 @@
+#!/usr/bin/env python3
+"""
+evaluate_bc.py
+=============================================================================
+Live Evaluation & Benchmark for Behavioral Cloning (BC) Pre-Trained Policy.
+Features:
+  - Dynamic 3D Green Arrow pointing in the direction of the target orientation.
+  - Quadratic angle-dependent episode horizon (scaling with required rotation).
+  - 1-second observation delay between successive trajectories.
+  - Streamlined, unified execution loop for both visual and headless modes.
+  - Full removal of deprecated dependencies (pynput) and redundant code.
+=============================================================================
+"""
+
 import os
+import sys
 import time
+import argparse
+from typing import Optional
+
 import numpy as np
+import scipy.spatial.transform as transform
 import torch
 import mujoco
 import mujoco.viewer
-from pynput import keyboard
-from scipy.spatial.transform import Rotation as R
-
-import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from train_bc import ActorNetwork
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SCENE_XML = os.path.join(SCRIPT_DIR, "simulation/scene_cube.xml")
-CHECKPOINT_PATH = os.path.join(SCRIPT_DIR, "bc_actor_checkpoint.pth")
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from train_bc import ActorNetwork
+
+
+def draw_target_arrow(viewer, target_quat: np.ndarray, obj_pos: np.ndarray):
+    """
+    Renders a dynamic green 3D orientation arrow in the MuJoCo viewer pointing
+    in the direction of the target orientation frame.
+    """
+    if viewer is None or not hasattr(viewer, "user_scn") or viewer.user_scn is None:
+        return
+    viewer.user_scn.ngeom = 0
+    # MuJoCo quat convention: [w, x, y, z] -> Scipy: [x, y, z, w]
+    r = transform.Rotation.from_quat([target_quat[1], target_quat[2], target_quat[3], target_quat[0]])
+    mat = r.as_matrix().flatten().astype(np.float64)
+    # Position arrow slightly above object (0.08m) so it hovers clearly above contacts
+    arrow_pos = np.array([obj_pos[0], obj_pos[1], obj_pos[2] + 0.08], dtype=np.float64)
+    arrow_size = np.array([0.005, 0.005, 0.07], dtype=np.float64)  # [radius, radius, length]
+    arrow_rgba = np.array([0.1, 0.95, 0.2, 0.9], dtype=np.float32)  # Bright Green
+
+    geom = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+    mujoco.mjv_initGeom(geom, mujoco.mjtGeom.mjGEOM_ARROW, arrow_size, arrow_pos, mat, arrow_rgba)
+    viewer.user_scn.ngeom = 1
+
+
+def compute_angular_distance(q1: np.ndarray, q2: np.ndarray) -> float:
+    """Computes geodesic SO(3) angular distance between two quaternions in radians."""
+    dot = np.abs(np.dot(q1, q2))
+    dot_clamped = np.clip(dot, -1.0, 1.0)
+    return float(2.0 * np.arccos(dot_clamped))
+
 
 class BCEvaluator:
-    def __init__(self):
-        print("Initializing MuJoCo...")
-        self.model = mujoco.MjModel.from_xml_path(SCENE_XML)
-        self.data = mujoco.MjData(self.model)
-        
-        print("Loading BC Actor Network...")
-        if not os.path.exists(CHECKPOINT_PATH):
-            raise FileNotFoundError(f"Checkpoint not found at {CHECKPOINT_PATH}. Please run train_bc.py first!")
-            
+    def __init__(self, checkpoint_path: str, scene_xml_path: str):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(CHECKPOINT_PATH, map_location=self.device, weights_only=False)
+        print(f"Loading BC checkpoint from: {checkpoint_path}")
         
-        self.obs_mean = checkpoint['obs_mean']
-        self.obs_std = checkpoint['obs_std']
-        hp = checkpoint['hyperparameters']
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint not found at: {checkpoint_path}")
+            
+        payload = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.obs_mean = payload["obs_mean"].astype(np.float32)
+        self.obs_std = payload["obs_std"].astype(np.float32)
+        hp = payload.get("hyperparameters", {"obs_dim": 39, "act_dim": 12, "hidden_dims": [256]})
         
-        self.actor = ActorNetwork(obs_dim=hp['obs_dim'], act_dim=hp['act_dim'], hidden_dim=hp['hidden_dims'][0])
-        self.actor.load_state_dict(checkpoint['model_state_dict'])
-        self.actor.to(self.device)
+        self.actor = ActorNetwork(
+            obs_dim=hp["obs_dim"],
+            act_dim=hp["act_dim"],
+            hidden_dim=hp["hidden_dims"][0]
+        ).to(self.device)
+        self.actor.load_state_dict(payload["model_state_dict"])
         self.actor.eval()
         
-        # State variables
-        self.is_running = True
-        self.active_object = 1 # Default to cylinder
-        self.spawn_requested = 1
-        self.randomize_target_requested = False
-        self.target_quat = np.array([1.0, 0.0, 0.0, 0.0]) # [w, x, y, z]
+        self.model = mujoco.MjModel.from_xml_path(scene_xml_path)
+        self.data = mujoco.MjData(self.model)
         
-        self.joint_names = self.get_gripper_joint_names()
-        self.actuator_ids = [mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{name.replace('gripper_', '').replace('_joint', '')}") for name in self.joint_names]
-        
-    def get_gripper_joint_names(self):
-        names = []
-        for i in range(self.model.njnt):
-            name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
-            if name.startswith("gripper_") and "joint" in name:
-                names.append(name)
-        return names
+        self.joint_names = [
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+            for i in range(self.model.njnt)
+            if mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i).startswith("gripper_")
+            and "joint" in mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i)
+        ]
+        self.actuator_ids = [
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{name.replace('gripper_', '').replace('_joint', '')}")
+            for name in self.joint_names
+        ]
 
-    def on_press(self, key):
-        try:
-            if key.char in ['1', '2', '3']:
-                self.spawn_requested = int(key.char)
-            elif key.char == 'r':
-                self.randomize_target_requested = True
-            elif key.char == 'q':
-                self.is_running = False
-        except AttributeError:
-            pass
-            
-    def get_physical_params(self, obj_id):
-        # [radius/width, height, mass, friction]
+    def get_physical_params(self, obj_id: int) -> np.ndarray:
         if obj_id == 1:
-            return [0.045, 0.07, 1.0, 3.0]
+            return np.array([0.045, 0.07, 1.0, 3.0], dtype=np.float32)
         elif obj_id == 2:
-            return [0.045, 0.045, 1.0, 3.0]
+            return np.array([0.045, 0.045, 1.0, 3.0], dtype=np.float32)
         elif obj_id == 3:
-            return [0.055, 0.07, 1.0, 3.0]
-        return [0.045, 0.07, 1.0, 3.0]
+            return np.array([0.055, 0.07, 1.0, 3.0], dtype=np.float32)
+        return np.array([0.045, 0.07, 1.0, 3.0], dtype=np.float32)
 
-    def reset_gripper(self):
-        """Resets the Delto gripper joints, velocities, and actuators to the canonical starting pinch tripod pose."""
+    def reset_gripper_and_object(self, obj_id: int, max_goal_angle: float):
+        mujoco.mj_resetData(self.model, self.data)
+        
+        # Reset fingers to canonical pinch tripod pose
         initial_pose = [
             ("gripper_f1m1_joint", 0.0), ("gripper_f1m2_joint", 0.0),
             ("gripper_f1m3_joint", 0.8), ("gripper_f1m4_joint", 0.8),
@@ -93,147 +122,202 @@ class BCEvaluator:
                 vel_idx = self.model.jnt_dofadr[j_id]
                 self.data.qpos[qpos_idx] = val
                 self.data.qvel[vel_idx] = 0.0
+                act_name = f"act_{name.replace('gripper_', '').replace('_joint', '')}"
+                act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
+                if act_id != -1:
+                    self.data.ctrl[act_id] = val
             except Exception:
                 pass
                 
-        for j_name, val in initial_pose:
-            act_name = f"act_{j_name.replace('gripper_', '').replace('_joint', '')}"
-            act_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
-            if act_id != -1:
-                self.data.ctrl[act_id] = val
+        # Position active object at palm center (0, 0, 0.10) and move others far away
+        for i in range(1, 4):
+            try:
+                idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
+                vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
+                if i == obj_id:
+                    self.data.qpos[idx:idx+7] = [0.0, 0.0, 0.10, 1.0, 0.0, 0.0, 0.0]
+                else:
+                    self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.10, 1.0, 0.0, 0.0, 0.0]
+                self.data.qvel[vel_idx:vel_idx+6] = 0.0
+            except Exception:
+                pass
 
-    def run(self):
-        print("\n" + "="*50)
-        print("LIVE BC EVALUATION STARTED")
-        print("The script will automatically switch objects and target orientations every 5 seconds.")
-        print("Close the MuJoCo window to stop.")
-        print("="*50 + "\n")
+        # Sample target quaternion
+        if max_goal_angle >= (np.pi - 1e-4):
+            q_scipy = transform.Rotation.random().as_quat()
+            target_quat = np.array([q_scipy[3], q_scipy[0], q_scipy[1], q_scipy[2]], dtype=np.float32)
+        else:
+            axis = np.random.randn(3)
+            axis /= (np.linalg.norm(axis) + 1e-8)
+            angle = np.random.uniform(0.30, max_goal_angle)
+            rot = transform.Rotation.from_rotvec(axis * angle)
+            q_scipy = rot.as_quat()
+            target_quat = np.array([q_scipy[3], q_scipy[0], q_scipy[1], q_scipy[2]], dtype=np.float32)
+
+        mujoco.mj_forward(self.model, self.data)
+        for _ in range(15):
+            mujoco.mj_step(self.model, self.data)
+
+        return target_quat
+
+    def run_evaluation(
+        self,
+        num_episodes: int = 10,
+        render: bool = True,
+        max_goal_angle: float = 0.80,
+        object_id: Optional[int] = None,
+        inter_episode_delay: float = 1.0,
+    ):
+        print("\n" + "="*65)
+        print("STARTING BEHAVIORAL CLONING (BC) POLICY EVALUATION")
+        print(f"Max Goal Angle: {max_goal_angle:.2f} rad ({np.degrees(max_goal_angle):.1f}°) | Target Object: {object_id or 'Random (1-3)'}")
+        print(f"Angle-Horizon Law: Quadratic Scaling [200 + 150*theta + 150*theta^2] capped at 800 steps")
+        print(f"Trajectory Pause: {inter_episode_delay:.1f}s between episodes with live green target arrow")
+        print("="*65 + "\n")
         
-        mujoco.mj_resetData(self.model, self.data)
+        successes = 0
+        drops = 0
+        errors_deg = []
+        episode_lengths = []
         
-        with mujoco.viewer.launch_passive(self.model, self.data) as viewer:
+        viewer = None
+        if render:
+            viewer = mujoco.viewer.launch_passive(self.model, self.data)
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
             viewer.opt.flags[mujoco.mjtVisFlag.mjVIS_CONTACTFORCE] = True
-            
-            last_switch_time = time.time()
-            self.active_object = 1
-            self.spawn_requested = self.active_object
-            self.randomize_target_requested = True
-            
-            while viewer.is_running() and self.is_running:
-                step_start = time.time()
-                
-                # Automatically cycle objects and targets every 5 seconds
-                if time.time() - last_switch_time > 5.0:
-                    # Print achieved orientation and error before switching
-                    try:
-                        obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object}_joint").id]
-                        curr_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
-                        print(f"\nFinal Achieved Orientation: {np.round(curr_quat, 2)}")
-                        
-                        # Calculate error in degrees using Scipy [x, y, z, w]
-                        t_q_scipy = [self.target_quat[1], self.target_quat[2], self.target_quat[3], self.target_quat[0]]
-                        o_q_scipy = [curr_quat[1], curr_quat[2], curr_quat[3], curr_quat[0]]
-                        r_target = R.from_quat(t_q_scipy)
-                        r_achieved = R.from_quat(o_q_scipy)
-                        error_angle = (r_target * r_achieved.inv()).magnitude() * (180.0 / np.pi)
-                        print(f"Rotational Error: {error_angle:.2f} degrees")
-                    except Exception:
-                        pass
-                        
-                    self.active_object += 1
-                    if self.active_object > 3:
-                        self.active_object = 1
-                    self.spawn_requested = self.active_object
-                    self.randomize_target_requested = True
-                    last_switch_time = time.time()
-                
-                # Handle Object Spawning
-                if self.spawn_requested is not None:
-                    obj_id = self.spawn_requested
-                    self.spawn_requested = None
-                    print(f"\n---> Spawning object {obj_id} and resetting gripper...")
-                    
-                    # 1. Reset Gripper to canonical starting pinch tripod pose
-                    self.reset_gripper()
-                    
-                    # 2. Spawn requested object and hide others
-                    for i in range(1, 4):
-                        try:
-                            idx = self.model.jnt_qposadr[self.model.joint(f"obj_{i}_joint").id]
-                            vel_idx = self.model.jnt_dofadr[self.model.joint(f"obj_{i}_joint").id]
-                            if i == obj_id:
-                                # Spawn at origin
-                                self.data.qpos[idx:idx+7] = [0.0, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
-                            else:
-                                # Move others far away
-                                self.data.qpos[idx:idx+7] = [10.0 + i, 0.0, 0.1, 1.0, 0.0, 0.0, 0.0]
-                            self.data.qvel[vel_idx:vel_idx+6] = 0.0
-                        except Exception:
-                            pass
-                            
-                    # Update physics and visual viewer
-                    mujoco.mj_forward(self.model, self.data)
-                    viewer.sync()
-                    
-                    # 10 ms settling delay
-                    time.sleep(0.010)
-                            
-                # Handle Target Randomization
-                if self.randomize_target_requested:
-                    self.randomize_target_requested = False
-                    q = R.random().as_quat() # [x, y, z, w]
-                    self.target_quat = np.array([q[3], q[0], q[1], q[2]]) # MuJoCo format: [w, x, y, z]
-                    print(f"---> New Target Orientation: {np.round(self.target_quat, 2)}")
-                
-                # 1. Gather Observation
-                r_qpos = [self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names]
-                r_qvel = [self.data.qvel[self.model.jnt_dofadr[self.model.joint(j).id]] for j in self.joint_names]
-                
-                obj_pos = [0.0, 0.0, 0.0]
-                obj_quat = [1.0, 0.0, 0.0, 0.0]
-                try:
-                    obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object}_joint").id]
-                    obj_pos = self.data.qpos[obj_idx:obj_idx+3].copy()
-                    obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
-                except Exception:
-                    pass
-                    
-                phys_params = self.get_physical_params(self.active_object)
-                
-                # Build 39-dim vector
-                obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, phys_params]).astype(np.float32)
-                
-                # Normalize
-                obs_norm = (obs_raw - self.obs_mean) / self.obs_std
-                
-                # 2. Query Network for Action
-                obs_tensor = torch.FloatTensor(obs_norm).unsqueeze(0).to(self.device)
-                with torch.no_grad():
-                    action = self.actor(obs_tensor).squeeze(0).cpu().numpy()
-                
-                # 3. Apply Action (with clipping safety limit for velocities)
-                current_qpos = np.array(r_qpos)
-                delta_q = action - current_qpos
-                delta_q = np.clip(delta_q, -0.15, 0.15) # Speed limit to prevent breaking physics
-                safe_action = current_qpos + delta_q
-                
-                for i, aid in enumerate(self.actuator_ids):
-                    if aid != -1:
-                        self.data.ctrl[aid] = safe_action[i]
-                        
-                # 4. Step Simulation (Multiple substeps for stability)
-                for _ in range(10): # 10 substeps per control loop
-                    mujoco.mj_step(self.model, self.data)
-                    
-                viewer.sync()
-                
-                # Sleep to maintain approx realtime (assuming 0.002s timestep * 10 = 0.02s per loop)
-                time_until_next_step = 0.02 - (time.time() - step_start)
-                if time_until_next_step > 0:
-                    time.sleep(time_until_next_step)
-                    
-if __name__ == "__main__":
-    evaluator = BCEvaluator()
-    evaluator.run()
 
+        try:
+            for ep in range(1, num_episodes + 1):
+                if viewer is not None and not viewer.is_running():
+                    print("\n[Notice] MuJoCo viewer closed by user. Ending evaluation early.")
+                    break
+
+                curr_obj_id = object_id if object_id in [1, 2, 3] else np.random.choice([1, 2, 3])
+                target_quat = self.reset_gripper_and_object(curr_obj_id, max_goal_angle)
+                
+                obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{curr_obj_id}_joint").id]
+                cur_obj_pos = self.data.qpos[obj_idx:obj_idx+3].copy()
+                cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
+                
+                initial_err = compute_angular_distance(cur_obj_quat, target_quat)
+                initial_deg = np.degrees(initial_err)
+                
+                # Quadratic Horizon Law
+                quad_steps = int(200 + 150 * initial_err + 150 * (initial_err ** 2))
+                max_steps = min(800, quad_steps)
+                
+                print(f"\n[Episode {ep:02d}/{num_episodes:02d}] Object: {curr_obj_id} | "
+                      f"Initial Target Angle: {initial_deg:5.1f}° | "
+                      f"Allocated Horizon: {max_steps} steps ({max_steps * 0.02:.2f}s)")
+                
+                step = 0
+                is_dropped = False
+                is_success = False
+                final_err_deg = initial_deg
+                
+                while step < max_steps:
+                    step += 1
+                    step_start = time.time()
+                    
+                    if viewer is not None and not viewer.is_running():
+                        return
+
+                    # Build 39-dim observation
+                    r_qpos = [self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names]
+                    r_qvel = [self.data.qvel[self.model.jnt_dofadr[self.model.joint(j).id]] for j in self.joint_names]
+                    cur_obj_pos = self.data.qpos[obj_idx:obj_idx+3].copy()
+                    cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
+                    phys_params = self.get_physical_params(curr_obj_id)
+                    
+                    obs_raw = np.concatenate([r_qpos, r_qvel, cur_obj_pos, cur_obj_quat, target_quat, phys_params]).astype(np.float32)
+                    obs_norm = (obs_raw - self.obs_mean) / self.obs_std
+                    
+                    obs_tensor = torch.as_tensor(obs_norm, dtype=torch.float32, device=self.device).unsqueeze(0)
+                    with torch.no_grad():
+                        action = self.actor(obs_tensor).squeeze(0).cpu().numpy()
+                        
+                    current_qpos = np.array(r_qpos)
+                    delta_q = np.clip(action - current_qpos, -0.15, 0.15)
+                    safe_action = current_qpos + delta_q
+                    
+                    for i, aid in enumerate(self.actuator_ids):
+                        if aid != -1:
+                            self.data.ctrl[aid] = safe_action[i]
+                            
+                    for _ in range(10):  # 10 substeps * 0.002s = 0.02s per step
+                        mujoco.mj_step(self.model, self.data)
+                        
+                    d_theta = compute_angular_distance(cur_obj_quat, target_quat)
+                    final_err_deg = float(np.degrees(d_theta))
+                    
+                    if d_theta < 0.28:  # 16 deg tolerance
+                        is_success = True
+                    if cur_obj_pos[2] < 0.02 or np.linalg.norm(cur_obj_pos[:2]) > 0.20:
+                        is_dropped = True
+                        break
+
+                    if viewer is not None:
+                        draw_target_arrow(viewer, target_quat, cur_obj_pos)
+                        viewer.sync()
+                        elapsed = time.time() - step_start
+                        if 0.02 - elapsed > 0:
+                            time.sleep(0.02 - elapsed)
+
+                errors_deg.append(final_err_deg)
+                episode_lengths.append(step)
+                if is_success:
+                    successes += 1
+                if is_dropped:
+                    drops += 1
+                    
+                status_str = "SUCCESS" if is_success else ("DROPPED" if is_dropped else "TIME_LIMIT")
+                print(f"  Finished: Steps: {step:3d}/{max_steps} | "
+                      f"Final Error: {final_err_deg:5.2f}° | "
+                      f"Status: {status_str}")
+
+                if ep < num_episodes:
+                    if viewer is not None and viewer.is_running():
+                        delay_start = time.time()
+                        while time.time() - delay_start < inter_episode_delay and viewer.is_running():
+                            draw_target_arrow(viewer, target_quat, cur_obj_pos)
+                            viewer.sync()
+                            time.sleep(0.02)
+                    else:
+                        time.sleep(inter_episode_delay)
+
+        finally:
+            if viewer is not None:
+                viewer.close()
+
+        if episode_lengths:
+            print("\n" + "="*65)
+            print(f"BC EVALUATION SUMMARY ({len(episode_lengths)} Episodes Completed):")
+            print(f"Success Rate:       {successes / len(episode_lengths) * 100:5.1f}% ({successes}/{len(episode_lengths)})")
+            print(f"Drop Rate:          {drops / len(episode_lengths) * 100:5.1f}% ({drops}/{len(episode_lengths)})")
+            print(f"Mean Steps:         {np.mean(episode_lengths):.1f} steps ({np.mean(episode_lengths)*0.02:.2f}s)")
+            print(f"Mean Angular Error: {np.mean(errors_deg):.2f}° +/- {np.std(errors_deg):.2f}°")
+            print("="*65 + "\n")
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Evaluate Behavioral Cloning Policy with Visual Target Arrow & Quadratic Horizon")
+    parser.add_argument("--checkpoint", type=str, default="in_hand_manipulation/bc_actor_checkpoint.pth", help="Path to BC checkpoint")
+    parser.add_argument("--scene_xml", type=str, default="in_hand_manipulation/simulation/scene_cube.xml", help="Path to scene XML")
+    parser.add_argument("--episodes", type=int, default=10, help="Number of evaluation episodes")
+    parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Max target rotation angle in radians (default: 0.80 rad ~= 45.8 deg)")
+    parser.add_argument("--object_id", type=int, default=0, help="Target object: 0=random, 1=cylinder, 2=cube, 3=cuboid (default: 0)")
+    parser.add_argument("--delay", type=float, default=1.0, help="Inter-episode delay in seconds (default: 1.0s)")
+    parser.add_argument("--no_render", action="store_true", help="Disable 3D viewer for fast headless benchmarking")
+    args = parser.parse_args()
+    
+    evaluator = BCEvaluator(
+        checkpoint_path=args.checkpoint,
+        scene_xml_path=args.scene_xml
+    )
+    evaluator.run_evaluation(
+        num_episodes=args.episodes,
+        render=not args.no_render,
+        max_goal_angle=args.max_goal_angle,
+        object_id=args.object_id if args.object_id > 0 else None,
+        inter_episode_delay=args.delay,
+    )

@@ -54,6 +54,10 @@ from torch.distributions import Normal
 
 # Import MuJoCo for the Delto hand simulation
 import mujoco
+try:
+    import mujoco.viewer
+except ImportError:
+    pass
 
 
 # =============================================================================
@@ -1123,6 +1127,7 @@ def parse_args():
     parser.add_argument("--actor_lr", type=float, default=3e-5, help="Actor learning rate")
     parser.add_argument("--critic_lr", type=float, default=3e-4, help="Critic learning rate")
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO clipping epsilon")
+    parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30% by default on mass, friction, size)")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
@@ -1165,6 +1170,7 @@ def main():
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         clip_eps=args.clip_eps,
+        max_episode_steps=args.max_steps,
         render=args.render,
         show_actions=args.show_actions,
         dr_ratio=args.dr_ratio,

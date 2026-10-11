@@ -496,6 +496,43 @@ The policy achieved an immediate and decisive performance breakthrough:
 4. **Permanent Best Model Backup:** Saved [`checkpoints_ppo/ppo_stage1_best_model.pth`](file:///mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/checkpoints_ppo/ppo_stage1_best_model.pth) to guarantee a permanent, protected fallback.
 
 
+## 15. Angular Error as the Primary Governing Factor for Best Model Selection
+
+### The Problem with Binary Success Rate Selection:
+Previously, model checkpointing in PPO was governed solely by binary rollout success rate:
+$$\text{Save Checkpoint if } \text{success\_rate} > \text{best\_success\_rate}$$
+
+This created two critical failure modes:
+1. **The Step-Function Quantization Blind Spot:** A binary threshold treats $14.1^\circ$ error as a success and $14.2^\circ$ as complete failure. If Model A scores $30\%$ success with $55^\circ$ mean angular error, and Model B scores $26\%$ success with **$22^\circ$ mean angular error**, the old system wrongly preferred Model A despite Model B having over $2.5\times$ better rotational precision.
+2. **Curriculum Bias Lockout:** Under `--curriculum_epsilon`, when the policy performs well, $\epsilon$ contracts (e.g. from $0.25\text{ rad} \approx 14.3^\circ$ down to $0.12\text{ rad} \approx 6.9^\circ$). An early policy evaluated against loose tolerances could hit $35\%$ success, locking out later, vastly more accurate policies that scored $28\%$ against the ultra-tight target!
+
+### Empirical Verification: SOTA Milestone at Iteration 2,000
+Benchmarking 15 randomized evaluation episodes across objects (1-3) revealed the stark divergence:
+
+| Metric | `ppo_stage1_best_model.pth` | `ppo_best_actor.pth` (Old Binary Selection) | `ppo_checkpoint_iter_2000.pth` (New 2k Milestone) |
+| :--- | :---: | :---: | :---: |
+| **Deterministic Success Rate** | $40.0\%$ ($6/15$) | $46.7\%$ ($7/15$) | **$\mathbf{80.0\%}$ ($12/15$)** ($+33.3\%$ absolute gain!) |
+| **Drop Rate** | $13.3\%$ ($2/15$) | $20.0\%$ ($3/15$) | **$\mathbf{6.7\%}$ ($1/15$)** (Only 1 drop in 15 episodes) |
+| **Mean Horizon** | $464.4\text{ steps}$ ($9.29\text{s}$) | $464.3\text{ steps}$ ($9.29\text{s}$) | **$\mathbf{523.3\text{ steps}}$ ($\mathbf{10.47\text{s}}$ active hold)** |
+| **Mean Angular Error** | $48.68^\circ \pm 39.87^\circ$ | $50.16^\circ \pm 31.07^\circ$ | **$\mathbf{38.62^\circ \pm 16.86^\circ}$** ($\mathbf{11.5^\circ}$ lower error) |
+
+The 2,000-iteration policy achieved an **80.0% success rate and 6.7% drop rate**, yet had never been saved as `ppo_best_actor.pth` because its training rollout success against tight $\epsilon$ read $26\% - 30\%$.
+
+### Architectural Solution: Composite Performance Index (CPI)
+We implemented the **Composite Performance Index (CPI)** to govern `best_model` selection:
+$$\text{CPI} = (\text{Success Rate} \times 100) - 0.5 \times (\text{Mean Error (deg)}) - 0.5 \times (\text{Drop Rate} \times 100)$$
+
+- **Linear Success Incentive ($+1.0\text{ per }\%$):** Continues driving goal acquisition.
+- **Geodesic Error Penalization ($-0.5\text{ per degree}$):** Directly rewards closing the orientation gap, ensuring models with tighter alignment always score higher.
+- **Drop Rate Penalization ($-0.5\text{ per }\%$):** Protects grasp retention.
+
+### Full Optimizer & Critic State Restoration:
+- Pre-training/resuming now checks and restores both `critic_optimizer_state_dict` and `actor_optimizer_state_dict`, with explicit per-parameter group learning rate enforcement, preventing Critic value misalignment across training runs.
+- Checkpoint directory cleaned of 740 MB intermediate files, preserving `ppo_checkpoint_iter_1000.pth`, `ppo_checkpoint_iter_2000.pth`, and updated `ppo_best_actor.pth`.
+- Added `--save_freq` CLI flag (default: 100 iterations) to avoid disk bloat.
+
+
+
 
 
 

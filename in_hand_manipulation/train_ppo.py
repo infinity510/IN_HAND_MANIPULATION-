@@ -138,6 +138,7 @@ class PPOConfig:
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     w4: float = 10.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
+    save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
     dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
@@ -1002,6 +1003,7 @@ class TrainingLogger:
         self.jsonl_path = os.path.join(log_dir, "metrics.jsonl")
         self.fieldnames = [
             "iteration", "ep_return", "step_reward", "ep_length", "success_rate", "drop_rate",
+            "mean_error_deg", "composite_score",
             "loss_critic", "loss_actor", "entropy", "clip_fraction",
             "approx_kl", "log_std", "elapsed_sec"
         ]
@@ -1038,14 +1040,14 @@ class PPOFineTuner:
         self.actor = ActorNetwork(obs_dim=self.cfg.obs_dim, act_dim=self.cfg.act_dim).to(self.device)
         self.critic = CriticNetwork(obs_dim=self.cfg.obs_dim).to(self.device)
         
-        # 2. Load Behavior Cloning Checkpoint & Init Parameters
-        self.obs_mean, self.obs_std = self._load_bc_checkpoint()
-        
-        # 3. Instantiate Dual Optimizers (Decoupled learning rates)
+        # 2. Instantiate Dual Optimizers (Decoupled learning rates)
         # Conservative Actor LR (3e-5) prevents policy degradation
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.cfg.actor_lr, eps=1e-5)
         # Standard Critic LR (3e-4) learns value functions rapidly
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.cfg.critic_lr, eps=1e-5)
+        
+        # 3. Load Behavior Cloning Checkpoint & Init Parameters (resumes Critic & Optimizers if present)
+        self.obs_mean, self.obs_std = self._load_bc_checkpoint()
         
         # 4. Instantiate Rollout Buffer
         self.buffer = RolloutBuffer(
@@ -1089,6 +1091,7 @@ class PPOFineTuner:
         self.recent_lengths = deque(maxlen=50)
         self.recent_successes = deque(maxlen=50)
         self.recent_drops = deque(maxlen=50)
+        self.recent_errors_deg = deque(maxlen=50)
         self.ep_returns = np.zeros(self.cfg.num_envs, dtype=np.float32)
         self.ep_lengths = np.zeros(self.cfg.num_envs, dtype=np.int32)
 
@@ -1115,6 +1118,22 @@ class PPOFineTuner:
         if "critic_state_dict" in checkpoint:
             self.critic.load_state_dict(checkpoint["critic_state_dict"], strict=False)
             print("[PPOFineTuner] Critic weights successfully resumed from PPO checkpoint.")
+            if "critic_optimizer_state_dict" in checkpoint:
+                try:
+                    self.critic_optimizer.load_state_dict(checkpoint["critic_optimizer_state_dict"])
+                    for pg in self.critic_optimizer.param_groups:
+                        pg['lr'] = self.cfg.critic_lr
+                    print("[PPOFineTuner] Critic optimizer state successfully restored.")
+                except Exception as e:
+                    print(f"[PPOFineTuner] Note: Could not restore critic optimizer state: {e}")
+            if "actor_optimizer_state_dict" in checkpoint:
+                try:
+                    self.actor_optimizer.load_state_dict(checkpoint["actor_optimizer_state_dict"])
+                    for pg in self.actor_optimizer.param_groups:
+                        pg['lr'] = self.cfg.actor_lr
+                    print("[PPOFineTuner] Actor optimizer state successfully restored.")
+                except Exception as e:
+                    print(f"[PPOFineTuner] Note: Could not restore actor optimizer state: {e}")
             if "log_std" in checkpoint:
                 with torch.no_grad():
                     self.actor.log_std.copy_(torch.as_tensor(checkpoint["log_std"], device=self.device))
@@ -1151,6 +1170,7 @@ class PPOFineTuner:
         self.critic.eval()
         
         total_rollout_reward = 0.0
+        step_errors = []
         steps_per_env = self.buffer.steps_per_env
         
         for step in range(steps_per_env):
@@ -1171,6 +1191,10 @@ class PPOFineTuner:
             next_obs, rewards, terminateds, truncateds, infos = self.vec_env.step(action_np)
             dones = terminateds | truncateds
             total_rollout_reward += float(np.sum(rewards))
+            
+            # Collect step-level geodesic angular errors across all parallel environments
+            for env_idx in range(self.cfg.num_envs):
+                step_errors.append(float(infos[env_idx].get("d_theta", 0.0)) * (180.0 / np.pi))
             
             # Optional pacing for human-observable visual playback if rendering in single-env mode
             if self.cfg.render and self.cfg.num_envs == 1:
@@ -1193,6 +1217,8 @@ class PPOFineTuner:
                     self.recent_lengths.append(int(self.ep_lengths[env_idx]))
                     self.recent_successes.append(1.0 if infos[env_idx].get("is_success", False) else 0.0)
                     self.recent_drops.append(1.0 if infos[env_idx].get("is_dropped", False) else 0.0)
+                    err_deg = float(infos[env_idx].get("d_theta", 0.0)) * (180.0 / np.pi)
+                    self.recent_errors_deg.append(err_deg)
                     self.ep_returns[env_idx] = 0.0
                     self.ep_lengths[env_idx] = 0
             
@@ -1219,12 +1245,22 @@ class PPOFineTuner:
         self.buffer.compute_gae(last_values=last_values, gamma=self.cfg.gamma, gae_lambda=self.cfg.gae_lambda)
         
         step_reward = total_rollout_reward / float(self.buffer.total_size)
+        mean_err_deg = float(np.mean(self.recent_errors_deg)) if self.recent_errors_deg else (float(np.mean(step_errors)) if step_errors else 0.0)
+        succ_rate = float(np.mean(self.recent_successes)) if self.recent_successes else 0.0
+        drop_rate = float(np.mean(self.recent_drops)) if self.recent_drops else 0.0
+        
+        # Composite Performance Index (CPI):
+        # Rewards success rate (+1.0 per %), penalizes angular error (-0.5 per deg) and drops (-0.5 per %)
+        composite_score = (succ_rate * 100.0) - (0.5 * mean_err_deg) - (0.5 * drop_rate * 100.0)
+        
         metrics = {
             "step_reward": step_reward,
             "ep_return": float(np.mean(self.recent_returns)) if self.recent_returns else (step_reward * self.cfg.max_episode_steps),
             "ep_length": float(np.mean(self.recent_lengths)) if self.recent_lengths else float(np.mean(self.ep_lengths)),
-            "success_rate": float(np.mean(self.recent_successes)) if self.recent_successes else 0.0,
-            "drop_rate": float(np.mean(self.recent_drops)) if self.recent_drops else 0.0,
+            "success_rate": succ_rate,
+            "drop_rate": drop_rate,
+            "mean_error_deg": mean_err_deg,
+            "composite_score": composite_score,
         }
         return current_obs, metrics
 
@@ -1360,7 +1396,9 @@ class PPOFineTuner:
         print("="*75 + "\n")
         
         obs = self.vec_env.reset()
+        best_composite_score = -float('inf')
         best_success_rate = 0.0
+        best_mean_error = float('inf')
         best_ep_return = -float('inf')
         start_time = time.time()
         
@@ -1386,6 +1424,8 @@ class PPOFineTuner:
                     "ep_length": rollout_metrics["ep_length"],
                     "success_rate": rollout_metrics["success_rate"],
                     "drop_rate": rollout_metrics["drop_rate"],
+                    "mean_error_deg": rollout_metrics["mean_error_deg"],
+                    "composite_score": rollout_metrics["composite_score"],
                     "loss_critic": update_metrics["loss_critic"],
                     "loss_actor": update_metrics["loss_actor"],
                     "entropy": update_metrics["entropy"],
@@ -1401,21 +1441,31 @@ class PPOFineTuner:
                 print(
                     f"Iter {iteration:03d}/{self.cfg.num_iterations:03d} {phase_tag:<18} | "
                     f"EpRet: {rollout_metrics['ep_return']:7.1f} | "
-                    f"StepR: {rollout_metrics['step_reward']:6.2f} | "
                     f"Succ: {rollout_metrics['success_rate']*100:5.1f}% | "
                     f"Drop: {rollout_metrics['drop_rate']*100:5.1f}% | "
+                    f"Err: {rollout_metrics['mean_error_deg']:4.1f}° | "
+                    f"Score: {rollout_metrics['composite_score']:+5.1f} | "
                     f"CritLoss: {update_metrics['loss_critic']:6.4f} | "
-                    f"ActLoss: {update_metrics['loss_actor']:6.4f} | "
                     f"KL: {update_metrics['approx_kl']:.4f}{kl_flag} | "
                     f"Time: {elapsed:4.1f}s"
                 )
                 
-                # Model Checkpointing
+                # Model Checkpointing governed by Composite Performance Index (CPI)
+                # Combines Success Rate (+), Angular Error Reduction (-), and Grasp Retention (-)
                 if not is_warmup:
-                    if rollout_metrics["success_rate"] > best_success_rate and rollout_metrics["success_rate"] > 0.0:
+                    comp_score = rollout_metrics["composite_score"]
+                    if comp_score > best_composite_score:
+                        best_composite_score = comp_score
                         best_success_rate = rollout_metrics["success_rate"]
+                        best_mean_error = rollout_metrics["mean_error_deg"]
                         self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
-                    elif best_success_rate == 0.0 and rollout_metrics["ep_return"] > best_ep_return:
+                        print(
+                            f"  --> [NEW BEST MODEL SAVED] Score: {comp_score:+.2f} | "
+                            f"Succ: {rollout_metrics['success_rate']*100:.1f}% | "
+                            f"Err: {rollout_metrics['mean_error_deg']:.1f}° | "
+                            f"Drop: {rollout_metrics['drop_rate']*100:.1f}%"
+                        )
+                    elif best_composite_score == -float('inf') and rollout_metrics["ep_return"] > best_ep_return:
                         best_ep_return = rollout_metrics["ep_return"]
                         self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
                     
@@ -1453,7 +1503,7 @@ class PPOFineTuner:
                             self.vec_env.set_max_goal_angle(new_angle)
                             print(f"  [Curriculum -] Low proficiency ({recent_succ*100:.1f}%). Contracted goal angle: {np.degrees(current_angle):.1f}° -> {np.degrees(new_angle):.1f}°")
                         
-                if iteration % 25 == 0 or iteration == self.cfg.num_iterations:
+                if iteration % self.cfg.save_freq == 0 or iteration == self.cfg.num_iterations:
                     self.save_checkpoint(os.path.join(output_dir, f"ppo_checkpoint_iter_{iteration}.pth"), iteration, rollout_metrics)
         except KeyboardInterrupt:
             print("\n[PPOFineTuner] Training interrupted by user (Ctrl+C). Saving latest checkpoint...")
@@ -1465,7 +1515,8 @@ class PPOFineTuner:
         total_time = (time.time() - start_time) / 60.0
         print("\n" + "="*75)
         print(f"PPO FINE-TUNING FINISHED in {total_time:.2f} minutes!")
-        print(f"Best Success Rate: {best_success_rate * 100:.2f}%")
+        print(f"Best Composite Score: {best_composite_score:+.2f}")
+        print(f"Best Success Rate: {best_success_rate * 100:.2f}% | Best Mean Error: {best_mean_error:.1f}°")
         print(f"Models saved in: {output_dir}")
         print("="*75)
 
@@ -1526,6 +1577,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default="", help="Path to bc_actor_checkpoint.pth")
     parser.add_argument("--scene_xml", type=str, default="", help="Path to scene_cube.xml")
     parser.add_argument("--output_dir", type=str, default="checkpoints_ppo", help="Output directory for checkpoints")
+    parser.add_argument("--save_freq", type=int, default=100, help="Interval (iterations) to save periodic milestone checkpoints (default: 100)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
 
@@ -1585,6 +1637,7 @@ def main():
         w_action_rate=args.w_action_rate,
         w4=args.w4,
         w5=args.w5,
+        save_freq=args.save_freq,
         render=args.render,
         show_actions=args.show_actions,
         dr_ratio=args.dr_ratio,

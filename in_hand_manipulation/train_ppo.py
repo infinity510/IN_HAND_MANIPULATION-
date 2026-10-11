@@ -334,8 +334,9 @@ class DeltoInHandManipulationEnv:
         # Injects the randomized physical parameters into observation state
         obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, self.current_phys_params], axis=0)
         
-        # Apply observation normalization from BC pretraining: (s - mean) / std
-        obs_norm = (obs_raw - self.obs_mean) / self.obs_std
+        # Apply observation normalization from BC pretraining: (s - mean) / std with outlier clipping
+        obs_norm = (obs_raw - self.obs_mean) / (self.obs_std + 1e-8)
+        obs_norm = np.clip(obs_norm, -10.0, 10.0)
         return obs_norm.astype(np.float32)
 
     def count_contacts(self) -> int:
@@ -857,8 +858,19 @@ class PPOFineTuner:
         print(f"[PPOFineTuner] Actor log_std manually initialized to: {self.actor.log_std.data.cpu().numpy()[0]:.2f} "
               f"(sigma ~= {self.actor.log_std.exp().data.cpu().numpy()[0]:.4f} rad)")
         
-        obs_mean = checkpoint.get("obs_mean", np.zeros(self.cfg.obs_dim, dtype=np.float32))
-        obs_std = checkpoint.get("obs_std", np.ones(self.cfg.obs_dim, dtype=np.float32))
+        obs_mean = checkpoint.get("obs_mean", np.zeros(self.cfg.obs_dim, dtype=np.float32)).copy()
+        obs_std = checkpoint.get("obs_std", np.ones(self.cfg.obs_dim, dtype=np.float32)).copy()
+        
+        # Guard against zero-variance features from BC dataset (e.g. mass and friction at indices 37, 38)
+        # where obs_std is 1e-8. When domain randomization varies these properties, dividing by 1e-8
+        # produces observation magnitudes of 1e7+, causing 60M+ gradient explosions.
+        if obs_std.shape[0] >= 39:
+            if obs_std[37] < 1e-3:
+                obs_std[37] = 0.20  # Nominal mass = 1.0 -> std = 0.20
+            if obs_std[38] < 1e-3:
+                obs_std[38] = 0.60  # Nominal friction = 3.0 -> std = 0.60
+        obs_std = np.maximum(obs_std, 1e-2)
+        
         return obs_mean, obs_std
 
     def collect_rollouts(self, current_obs: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:

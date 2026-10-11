@@ -772,8 +772,53 @@ During an extended 8,900-iteration Stage 1 training run, the policy exhibited no
     --critic_lr 1e-4 \
     --curriculum_epsilon \
     --save_freq 250 \
-    --output_dir checkpoints_ppo
-  ```
+  
+## 22. Stabilization Protocol: Fixed-Tolerance Consolidation from Golden Checkpoint (Iter 125)
+
+### 1. Diagnosis of Post-Ascent Oscillation (Iter 126 – 374)
+Telemetry analysis of `progress.csv` revealed a sharp peak followed by an oscillatory feedback loop:
+1. **The Peak at Iteration 125:**
+   - Success rate jumped to **$32.0\%$**
+   - Drop rate dropped to **$20.0\%$**
+   - Rotational closure reached **$41.7\%$**
+   - Effective Manipulation Index (EMI) peaked at **$0.3339$** (saved as `ppo_stage1_iter125_golden.pth`)
+   - Mean error dropped to **$44.7^\circ$**
+2. **The Mechanism of Oscillation:**
+   - **Premature Goalpost Contraction:** Because proficiency exceeded the threshold at Iter 125, `curriculum_epsilon` contracted `epsilon_ratio` from $25.0\% \to 20.5\%$. The hand was forced to achieve sub-$8^\circ$ accuracy before it had solidified multi-finger contact stability.
+   - **Drop Spikes:** Pushing for the tighter orientation envelope caused fingertip slipping, driving drops from $20\% \to 38\%-42\%$.
+   - **Terminal Success Illusion:** On the console, binary success appeared to collapse to $6\%-14\%$ solely because the goal tolerance was tightened by $18\%$.
+   - **Critic Volatility:** High reward weights ($w_4=25, w_5=25$) created return cliffs when cubes dropped ($+350 \to -25$), causing `CritLoss` to blow out to $200 - 892$.
+
+### 2. Architectural Stabilization Measures Implemented
+1. **Fixed-Tolerance Consolidation:**
+   - Retaining $\epsilon_{\text{ratio}} = 25.0\%$ fixed (disabling `--curriculum_epsilon` during phase consolidation).
+   - This provides a stable, unmoving optimization landscape where the policy can master finger gaiting and push retention rate towards $90\%+$ without destabilizing drops.
+2. **Reward Scale Stabilization:**
+   - Scaled terminal bonus/penalty to $w_4 = 15.0, w_5 = 15.0$.
+   - Retained strong guidance gradients: $w_{\text{progress}} = 4.0, w_{\text{precision}} = 2.0$.
+   - Reduced `CritLoss` from $400-800$ down to $\sim 3.4$, ensuring smooth, low-variance GAE advantages.
+3. **Golden Checkpoint Baseline Protection:**
+   - When loading a checkpoint, `_load_bc_checkpoint()` extracts `checkpoint["metrics"]["emi_score"]` into `self.resumed_best_emi`.
+   - `train()` initializes `best_emi_score = resumed_best_emi` ($0.3339$), guaranteeing that early rollout variance cannot overwrite `ppo_best_actor.pth` with a weaker policy.
+
+### 3. Production Retraining Command
+```bash
+python3 in_hand_manipulation/train_ppo.py \
+  --iterations 10000 \
+  --num_envs 16 \
+  --checkpoint checkpoints_ppo/ppo_stage1_iter125_golden.pth \
+  --warmup_iters 0 \
+  --w_progress 4.0 \
+  --w_precision 2.0 \
+  --w4 15.0 \
+  --w5 15.0 \
+  --epsilon_ratio 0.25 \
+  --actor_lr 2e-5 \
+  --critic_lr 1e-4 \
+  --save_freq 250 \
+  --output_dir checkpoints_ppo
+```
+
 
 
 

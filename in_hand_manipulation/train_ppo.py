@@ -1224,6 +1224,9 @@ class PPOFineTuner:
                 obs_std[38] = 0.60  # Nominal friction = 3.0 -> std = 0.60
         obs_std = np.maximum(obs_std, 1e-2)
         
+        # Preserve baseline best EMI score so resuming doesn't overwrite golden checkpoint with a lower score
+        self.resumed_best_emi = float(checkpoint.get("metrics", {}).get("emi_score", -1.0))
+        
         return obs_mean, obs_std
 
     def collect_rollouts(self, current_obs: np.ndarray) -> Tuple[np.ndarray, Dict[str, float]]:
@@ -1477,7 +1480,9 @@ class PPOFineTuner:
         print("="*75 + "\n")
         
         obs = self.vec_env.reset()
-        best_emi_score = -1.0
+        best_emi_score = getattr(self, "resumed_best_emi", -1.0)
+        if best_emi_score > 0:
+            print(f"[PPOFineTuner] Checkpoint baseline established: Best EMI = {best_emi_score:.4f} (new saves must exceed this)\n")
         best_composite_score = -float('inf')
         best_success_rate = 0.0
         best_mean_error = float('inf')

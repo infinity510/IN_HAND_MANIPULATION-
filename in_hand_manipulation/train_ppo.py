@@ -569,7 +569,14 @@ class DeltoInHandManipulationEnv:
         terminated = is_dropped
         truncated = (self.step_count >= self.current_max_steps)
         
-        rot_closure = max(0.0, 1.0 - (d_theta / (self.initial_d_theta + 1e-6)))
+        # Rotational Closure for the episode:
+        # If the policy achieved one or more goals during the episode, it achieved full 100% rotational closure.
+        # Otherwise, closure measures proportional reduction in angular error toward the goal.
+        if self.episode_successes > 0:
+            rot_closure = 1.0
+        else:
+            rot_closure = max(0.0, 1.0 - (d_theta / (self.initial_d_theta + 1e-6)))
+            
         next_obs = self._get_observation()
         info = {
             "d_theta": d_theta,
@@ -1402,6 +1409,11 @@ class PPOFineTuner:
                     clipped = (ratio < (1.0 - self.cfg.clip_eps)) | (ratio > (1.0 + self.cfg.clip_eps))
                     clip_fractions.append(clipped.float().mean().item())
                 
+                # Immediate KL safety guard: abort if policy drifts beyond trust region
+                if not is_warmup and self.cfg.target_kl is not None and approx_kl > (1.5 * self.cfg.target_kl):
+                    kl_early_stopped = True
+                    break
+                
                 # Clipped Surrogate Objective:
                 # Surr1 = r_t(theta) * A_t
                 # Surr2 = clip(r_t(theta), 1 - eps, 1 + eps) * A_t
@@ -1544,20 +1556,22 @@ class PPOFineTuner:
                         
                     # Adaptive Bidirectional Curriculum on Proportional Epsilon Ratio (x% of angle)
                     if self.cfg.curriculum_epsilon:
+                        recent_succ = rollout_metrics["success_rate"]
+                        recent_drop = rollout_metrics["drop_rate"]
                         recent_closure = rollout_metrics["rotational_closure"]
                         current_ratio = self.cfg.epsilon_ratio
-                        # Tighten tolerance if closure >= 60% and drop rate <= 15%
-                        if recent_closure >= 0.60 and rollout_metrics["drop_rate"] <= 0.15 and current_ratio > self.cfg.min_epsilon_ratio:
+                        # Tighten tolerance if policy demonstrates solid proficiency (success >= 15% or closure >= 45%, drops <= 22%)
+                        if (recent_succ >= 0.15 or recent_closure >= 0.45) and recent_drop <= 0.22 and current_ratio > self.cfg.min_epsilon_ratio:
                             new_ratio = max(self.cfg.min_epsilon_ratio, current_ratio * 0.985)
                             self.cfg.epsilon_ratio = new_ratio
                             self.vec_env.set_epsilon_ratio(new_ratio)
-                            print(f"  [Curriculum +] High closure ({recent_closure*100:.1f}%). Tightened tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
-                        # Relax tolerance if closure < 35% or drop rate > 30%
-                        elif (recent_closure < 0.35 or rollout_metrics["drop_rate"] > 0.30) and current_ratio < self.cfg.max_epsilon_ratio:
+                            print(f"  [Curriculum +] High proficiency (Succ: {recent_succ*100:.1f}%, Clos: {recent_closure*100:.1f}%, Drop: {recent_drop*100:.1f}%). Tightened tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
+                        # Relax tolerance if success < 6% or drops > 35%
+                        elif (recent_succ < 0.06 or recent_drop > 0.35) and current_ratio < self.cfg.max_epsilon_ratio:
                             new_ratio = min(self.cfg.max_epsilon_ratio, current_ratio * 1.015)
                             self.cfg.epsilon_ratio = new_ratio
                             self.vec_env.set_epsilon_ratio(new_ratio)
-                            print(f"  [Curriculum -] Low closure ({recent_closure*100:.1f}%). Relaxed tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
+                            print(f"  [Curriculum -] Low proficiency (Succ: {recent_succ*100:.1f}%, Drop: {recent_drop*100:.1f}%). Relaxed tolerance ratio: {current_ratio*100:.1f}% -> {new_ratio*100:.1f}%")
                         
                     # Adaptive Bidirectional Curriculum on Goal Angle (Reachable Envelope)
                     if self.cfg.curriculum_goal_angle:

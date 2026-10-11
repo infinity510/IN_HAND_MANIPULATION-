@@ -672,6 +672,45 @@ in_hand_manipulation/
 | **Headless Benchmark**| `--no_render` | `--no_render` | `--no_render` |
 
 
+## 20. Resolution: Continuous Resampling Metric Accounting & Curriculum Activation
+
+### 1. Root Cause Analysis: Why Epsilon Ratio ($25\%$) Stalled
+During the 4,000-iteration Stage 1 fine-tuning run, `EpsR` remained locked at $25.0\%$ despite hundreds of iterations. Deep analysis of `progress.csv` and the environment step cycle identified two compounding factors:
+
+1. **Continuous Goal Resampling Accounting Artifact:**
+   - Under the OpenAI Dactyl continuous goal resampling mechanism, reaching a target orientation immediately resets `target_quat` and re-initializes `initial_d_theta` to the *subsequent goal*.
+   - When an episode concluded via time-limit truncation ($500$ steps), the environment measured residual error against the *in-progress, uncompleted subsequent goal*:
+     $$\mathcal{C}_{\text{terminal}} = 1.0 - \frac{d_\theta(\text{terminal})}{\theta_0(\text{subsequent})} \approx 0.05 - 0.15$$
+   - This erroneously credited a $100\%$ completed goal episode with only a $10\% - 15\%$ closure in the rollout buffer queue, preventing the curriculum proficiency check ($\mathcal{C} \ge 60\%$) from ever triggering.
+
+2. **Minibatch Policy Drift & KL Surge:**
+   - At iteration $730+$, large value loss updates caused `approx_kl` to surge to $1.71$ within minibatches before the epoch-level KL check was evaluated, causing finger tremors and driving drop rate up to $44\%$.
+
+---
+
+### 2. Architectural Corrections Applied
+
+1. **Accurate Goal Closure Crediting:**
+   ```python
+   # If policy achieved one or more goals during episode, credit 100% rotational closure:
+   if self.episode_successes > 0:
+       rot_closure = 1.0
+   else:
+       rot_closure = max(0.0, 1.0 - (d_theta / (self.initial_d_theta + 1e-6)))
+   ```
+
+2. **Robust Curriculum Trigger:**
+   Realigned the tightening gate to track task proficiency via both binary success and closure:
+   ```python
+   if (recent_succ >= 0.15 or recent_closure >= 0.45) and recent_drop <= 0.22 and current_ratio > min_ratio:
+       new_ratio = max(min_ratio, current_ratio * 0.985)
+   ```
+
+3. **Minibatch-Level KL Trust Region Guard:**
+   Evaluates `approx_kl` immediately after each minibatch update, halting backpropagation if `approx_kl > 1.5 * target_kl`, completely preventing policy divergence.
+
+
+
 
 
 

@@ -285,87 +285,93 @@ def main():
     # PART 1: STAGE 1 (PRECISION ENVELOPE theta <= 45.8° / 0.80 rad)
     # =========================================================================
     
-    # Check if Stage 1D (Part 1) is currently running
-    s1d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10")
-    if is_train_process_running() and os.path.exists(s1d_dir):
-        log("Stage 1D (Part 1, 10% error) is currently executing. Waiting for 10,000 iterations to finish...")
-        wait_for_active_training(s1d_dir)
-        
-        # Evaluate Stage 1D (Part 1)
-        best_s1d = os.path.join(s1d_dir, "ppo_best_actor.pth")
-        if not os.path.exists(best_s1d):
-            best_s1d = os.path.join(s1d_dir, "ppo_latest_actor.pth")
-        log("Evaluating Stage 1D (Part 1)...")
-        code, eval_out = run_cmd([
+    # Consolidated Stage 1 Best Model
+    stage1_consolidated = os.path.join(PROJECT_ROOT, "stage1", "stage1_best_model.pth")
+    if os.path.exists(stage1_consolidated):
+        log("Stage 1 verified and consolidated in stage1/stage1_best_model.pth. Proceeding directly to Stage 2...")
+        current_model = stage1_consolidated
+    else:
+        # Check if Stage 1D (Part 1) is currently running
+        s1d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10")
+        if is_train_process_running() and os.path.exists(s1d_dir):
+            log("Stage 1D (Part 1, 10% error) is currently executing. Waiting for 10,000 iterations to finish...")
+            wait_for_active_training(s1d_dir)
+            
+            # Evaluate Stage 1D (Part 1)
+            best_s1d = os.path.join(s1d_dir, "ppo_best_actor.pth")
+            if not os.path.exists(best_s1d):
+                best_s1d = os.path.join(s1d_dir, "ppo_latest_actor.pth")
+            log("Evaluating Stage 1D (Part 1)...")
+            code, eval_out = run_cmd([
+                "python3", "in_hand_manipulation/evaluate_stage1.py",
+                "--checkpoint", best_s1d,
+                "--episodes", "25",
+                "--no_render"
+            ])
+            append_report("Stage 1D Part 1 (EpsR = 10%)", eval_out[-1500:])
+            shutil.copy2(best_s1d, os.path.join(s1d_dir, "stage_1d_part1_golden.pth"))
+            cleanup_stage_dir(s1d_dir)
+            git_commit_and_push("chore(curriculum): Stage 1D Part 1 completed")
+            current_model = best_s1d
+        else:
+            current_model = os.path.join(s1d_dir, "ppo_best_actor.pth")
+            if not os.path.exists(current_model):
+                current_model = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15", "ppo_best_actor.pth")
+
+        # Step 1D (Part 2): Another 10k iterations on 10% error
+        s1d2_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10_part2")
+        if not is_stage_fully_completed(s1d2_dir, 10000):
+            current_model = run_training_stage(
+                stage_name="Stage 1D (Part 2 - 10k Consolidation)",
+                output_dir=s1d2_dir,
+                checkpoint_in=current_model,
+                iterations=10000,
+                epsilon_ratio=0.10,
+                max_goal_angle=0.80,
+                w_progress=4.0,
+                w_precision=3.0,
+                w4=20.0,
+                w5=15.0,
+                actor_lr=1.5e-5,
+                critic_lr=8e-5,
+                eval_script="in_hand_manipulation/evaluate_stage1.py"
+            )
+        else:
+            log("Stage 1D (Part 2) already completed. Resuming...")
+            current_model = os.path.join(s1d2_dir, "ppo_best_actor.pth")
+
+        # Step 1E: Another 10k iterations on 5% error for Stage 1 itself
+        s1e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps05")
+        if not is_stage_fully_completed(s1e_dir, 10000):
+            current_model = run_training_stage(
+                stage_name="Stage 1E (5% Precision Lock-In)",
+                output_dir=s1e_dir,
+                checkpoint_in=current_model,
+                iterations=10000,
+                epsilon_ratio=0.05,
+                max_goal_angle=0.80,
+                w_progress=4.0,
+                w_precision=4.0,
+                w4=25.0,
+                w5=15.0,
+                actor_lr=1.2e-5,
+                critic_lr=6e-5,
+                eval_script="in_hand_manipulation/evaluate_stage1.py"
+            )
+        else:
+            log("Stage 1E (5% error) already completed. Resuming...")
+            current_model = os.path.join(s1e_dir, "ppo_best_actor.pth")
+
+        # Comprehensive 50-episode Stage 1 Final Verification Benchmark
+        log("Running full 50-episode Stage 1 Final Precision Verification...")
+        code, stage1_final_eval = run_cmd([
             "python3", "in_hand_manipulation/evaluate_stage1.py",
-            "--checkpoint", best_s1d,
-            "--episodes", "25",
+            "--checkpoint", current_model,
+            "--episodes", "50",
             "--no_render"
         ])
-        append_report("Stage 1D Part 1 (EpsR = 10%)", eval_out[-1500:])
-        shutil.copy2(best_s1d, os.path.join(s1d_dir, "stage_1d_part1_golden.pth"))
-        cleanup_stage_dir(s1d_dir)
-        git_commit_and_push("chore(curriculum): Stage 1D Part 1 completed")
-        current_model = best_s1d
-    else:
-        current_model = os.path.join(s1d_dir, "ppo_best_actor.pth")
-        if not os.path.exists(current_model):
-            current_model = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15", "ppo_best_actor.pth")
-
-    # Step 1D (Part 2): Another 10k iterations on 10% error
-    s1d2_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10_part2")
-    if not is_stage_fully_completed(s1d2_dir, 10000):
-        current_model = run_training_stage(
-            stage_name="Stage 1D (Part 2 - 10k Consolidation)",
-            output_dir=s1d2_dir,
-            checkpoint_in=current_model,
-            iterations=10000,
-            epsilon_ratio=0.10,
-            max_goal_angle=0.80,
-            w_progress=4.0,
-            w_precision=3.0,
-            w4=20.0,
-            w5=15.0,
-            actor_lr=1.5e-5,
-            critic_lr=8e-5,
-            eval_script="in_hand_manipulation/evaluate_stage1.py"
-        )
-    else:
-        log("Stage 1D (Part 2) already completed. Resuming...")
-        current_model = os.path.join(s1d2_dir, "ppo_best_actor.pth")
-
-    # Step 1E: Another 10k iterations on 5% error for Stage 1 itself
-    s1e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps05")
-    if not is_stage_fully_completed(s1e_dir, 10000):
-        current_model = run_training_stage(
-            stage_name="Stage 1E (5% Precision Lock-In)",
-            output_dir=s1e_dir,
-            checkpoint_in=current_model,
-            iterations=10000,
-            epsilon_ratio=0.05,
-            max_goal_angle=0.80,
-            w_progress=4.0,
-            w_precision=4.0,
-            w4=25.0,
-            w5=15.0,
-            actor_lr=1.2e-5,
-            critic_lr=6e-5,
-            eval_script="in_hand_manipulation/evaluate_stage1.py"
-        )
-    else:
-        log("Stage 1E (5% error) already completed. Resuming...")
-        current_model = os.path.join(s1e_dir, "ppo_best_actor.pth")
-
-    # Comprehensive 50-episode Stage 1 Final Verification Benchmark
-    log("Running full 50-episode Stage 1 Final Precision Verification...")
-    code, stage1_final_eval = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_stage1.py",
-        "--checkpoint", current_model,
-        "--episodes", "50",
-        "--no_render"
-    ])
-    append_report("Stage 1 Grand Final Benchmark (50 Episodes, Sub-2.5° Tolerance)", stage1_final_eval[-2000:])
-    git_commit_and_push("feat(curriculum): Stage 1 100% completed with verified 5% precision benchmark")
+        append_report("Stage 1 Grand Final Benchmark (50 Episodes, Sub-2.5° Tolerance)", stage1_final_eval[-2000:])
+        git_commit_and_push("feat(curriculum): Stage 1 100% completed with verified 5% precision benchmark")
 
     # =========================================================================
     # PART 2: STAGE 2 (90° ROTATION ENVELOPE max_goal_angle = 1.57 rad / 90°)

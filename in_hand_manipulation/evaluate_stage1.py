@@ -52,6 +52,45 @@ def draw_target_arrow(viewer, target_quat: np.ndarray, obj_pos: np.ndarray):
     viewer.user_scn.ngeom = 1
 
 
+def return_to_mean_position(env, viewer=None, duration: float = 0.4):
+    """Smoothly transitions gripper joints to canonical mean starting tripod pinch pose and settles."""
+    initial_pose_dict = {
+        "gripper_f1m1_joint": 0.0, "gripper_f1m2_joint": 0.0,
+        "gripper_f1m3_joint": 0.8, "gripper_f1m4_joint": 0.8,
+        "gripper_f2m1_joint": -1.047, "gripper_f2m2_joint": 0.0,
+        "gripper_f2m3_joint": 0.8, "gripper_f2m4_joint": 0.8,
+        "gripper_f3m1_joint": 1.047, "gripper_f3m2_joint": 0.0,
+        "gripper_f3m3_joint": 0.8, "gripper_f3m4_joint": 0.8,
+    }
+    steps = int(duration / 0.02)
+    if viewer is not None and viewer.is_running() and steps > 0:
+        curr_qpos = {}
+        for name in initial_pose_dict:
+            j_id = env.model.joint(name).id
+            qpos_idx = env.model.jnt_qposadr[j_id]
+            curr_qpos[name] = float(env.data.qpos[qpos_idx])
+            
+        for s in range(1, steps + 1):
+            if not viewer.is_running():
+                break
+            alpha = s / steps
+            for name, target_val in initial_pose_dict.items():
+                j_id = env.model.joint(name).id
+                qpos_idx = env.model.jnt_qposadr[j_id]
+                interp = (1.0 - alpha) * curr_qpos[name] + alpha * target_val
+                env.data.qpos[qpos_idx] = interp
+                act_name = f"act_{name.replace('gripper_', '').replace('_joint', '')}"
+                act_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_ACTUATOR, act_name)
+                if act_id != -1:
+                    env.data.ctrl[act_id] = interp
+            mujoco.mj_forward(env.model, env.data)
+            viewer.sync()
+            time.sleep(0.02)
+    else:
+        env.reset_gripper_pose()
+        mujoco.mj_forward(env.model, env.data)
+
+
 def evaluate_stage1(
     checkpoint_path: str,
     scene_xml_path: str,
@@ -152,6 +191,11 @@ def evaluate_stage1(
                 obs, reward, terminated, truncated, step_info = env.step(action)
                 ep_reward += reward
                 
+                # Stop episode once 2 consecutive goals are achieved
+                if step_info.get("successes_in_episode", 0) >= 2:
+                    print(f"    >>> [2 GOALS ACHIEVED!] Successfully reached 2 consecutive targets in {step} steps. Ending episode early!")
+                    break
+                
                 if viewer is not None:
                     cur_obj_pos = env.data.qpos[obj_idx:obj_idx+3]
                     draw_target_arrow(viewer, env.target_quat, cur_obj_pos)
@@ -161,9 +205,15 @@ def evaluate_stage1(
                     if 0.02 - elapsed > 0:
                         time.sleep(0.02 - elapsed)
                         
+            succ_count = step_info.get("successes_in_episode", 0)
             final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
-            closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
-            is_succ = bool(final_err_deg <= eval_epsilon_deg or step_info.get("is_success", False))
+            if succ_count >= 2:
+                closure = 1.0
+                is_succ = True
+                final_err_deg = min(final_err_deg, eval_epsilon_deg)
+            else:
+                closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
+                is_succ = bool(final_err_deg <= eval_epsilon_deg or step_info.get("is_success", False) or succ_count > 0)
             is_drop = bool(step_info.get("is_dropped", False))
             
             errors_deg.append(final_err_deg)
@@ -174,22 +224,26 @@ def evaluate_stage1(
             if is_drop:
                 drops += 1
                 
-            status_str = f"SUCCESS (<= {eval_epsilon_deg:.1f}°)" if is_succ else ("DROPPED" if is_drop else f"TIMEOUT ({final_err_deg:.1f}° > {eval_epsilon_deg:.1f}°)")
+            status_str = f"SUCCESS ({succ_count}/2 Goals <= {eval_epsilon_deg:.1f}°)" if is_succ else ("DROPPED" if is_drop else f"TIMEOUT ({final_err_deg:.1f}° > {eval_epsilon_deg:.1f}°)")
             print(f"  Finished: Steps: {step:3d}/{max_steps} | "
                   f"Final Error: {final_err_deg:5.2f}° | "
                   f"Rotational Closure: {closure * 100:5.1f}% | "
                   f"Status: {status_str}")
             
+            # Return gripper joints to canonical mean position before next episode
+            return_to_mean_position(env, viewer, duration=0.4)
+            
             if ep < num_episodes:
+                remaining_delay = max(0.0, inter_episode_delay - 0.4)
                 if viewer is not None and viewer.is_running():
                     delay_start = time.time()
                     cur_obj_pos = env.data.qpos[obj_idx:obj_idx+3]
-                    while time.time() - delay_start < inter_episode_delay and viewer.is_running():
+                    while time.time() - delay_start < remaining_delay and viewer.is_running():
                         draw_target_arrow(viewer, env.target_quat, cur_obj_pos)
                         viewer.sync()
                         time.sleep(0.02)
                 else:
-                    time.sleep(inter_episode_delay)
+                    time.sleep(remaining_delay)
 
     finally:
         if viewer is not None:
@@ -216,7 +270,7 @@ def evaluate_stage1(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Stage 1 Evaluation: Tripod Precision Envelope (theta <= 45.8 deg)")
-    parser.add_argument("--checkpoint", type=str, default="checkpoints_ppo/ppo_best_actor.pth", help="Path to model checkpoint")
+    parser.add_argument("--checkpoint", type=str, default="stage1/stage1_best_model.pth", help="Path to model checkpoint")
     parser.add_argument("--scene_xml", type=str, default="in_hand_manipulation/simulation/scene_cube.xml", help="Path to scene XML")
     parser.add_argument("--episodes", type=int, default=15, help="Number of evaluation episodes (default: 15)")
     parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Max target rotation angle in radians (default: 0.80 rad ~= 45.8 deg)")

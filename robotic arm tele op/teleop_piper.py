@@ -4,7 +4,7 @@ import math
 import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 from webcam_aruco_tracker import WebcamArucoTracker
-from piper_sdk import *
+from piper_sdk import C_PiperInterface_V2
 
 def clip_pose_mm(x, y, z):
     """

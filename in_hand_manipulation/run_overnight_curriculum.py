@@ -135,6 +135,22 @@ def wait_for_active_training(dir_to_watch: str):
     time.sleep(5)
 
 
+def is_stage_fully_completed(stage_dir: str, target_iters: int) -> bool:
+    prog = os.path.join(stage_dir, "progress.csv")
+    if not (os.path.exists(stage_dir) and os.path.exists(prog)):
+        return False
+    try:
+        with open(prog, "r") as f:
+            lines = [l for l in f.readlines() if l.strip()]
+            if len(lines) > 1:
+                last_line = lines[-1].strip().split(",")
+                cur_iter = int(last_line[0])
+                return cur_iter >= target_iters
+    except Exception:
+        pass
+    return False
+
+
 def run_training_stage(
     stage_name: str,
     output_dir: str,
@@ -154,53 +170,75 @@ def run_training_stage(
     log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations}\n{'='*75}")
     os.makedirs(output_dir, exist_ok=True)
 
-    cmd = [
-        "python3", "in_hand_manipulation/train_ppo.py",
-        "--iterations", str(iterations),
-        "--num_envs", "16",
-        "--checkpoint", checkpoint_in,
-        "--warmup_iters", "0",
-        "--w_progress", str(w_progress),
-        "--w_precision", str(w_precision),
-        "--w4", str(w4),
-        "--w5", str(w5),
-        "--epsilon_ratio", str(epsilon_ratio),
-        "--max_goal_angle", str(max_goal_angle),
-        "--actor_lr", str(actor_lr),
-        "--critic_lr", str(critic_lr),
-        "--save_freq", "500",
-        "--output_dir", output_dir
-    ]
-    
-    log(f"Launching command: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd)
-    
-    last_iter_report = 0
-    while proc.poll() is None:
-        prog_path = os.path.join(output_dir, "progress.csv")
-        if os.path.exists(prog_path):
-            try:
-                with open(prog_path, "r") as f:
-                    lines = f.readlines()
-                    if len(lines) > 1:
-                        last_line = lines[-1].strip().split(",")
-                        cur_iter = int(last_line[0])
-                        if cur_iter - last_iter_report >= 500:
-                            last_iter_report = cur_iter
-                            succ = float(last_line[4]) * 100
-                            drop = float(last_line[5]) * 100
-                            clos = float(last_line[7]) * 100
-                            emi = float(last_line[8])
-                            err = float(last_line[10])
-                            ret = float(last_line[1])
-                            crit = float(last_line[12])
-                            log(f"  [Telemetry Matrix | {stage_name} Iter {cur_iter:05d}/{iterations}] EMI: {emi:.3f} | Succ: {succ:5.1f}% | Drop: {drop:5.1f}% | Clos: {clos:5.1f}% | Err: {err:5.1f}° | CritLoss: {crit:6.2f} | Return: {ret:7.1f}")
-            except Exception:
-                pass
-        time.sleep(30)
+    start_iteration = 1
+    prog_path = os.path.join(output_dir, "progress.csv")
+    if os.path.exists(prog_path):
+        try:
+            with open(prog_path, "r") as f:
+                lines = [l for l in f.readlines() if l.strip()]
+                if len(lines) > 1:
+                    last_line = lines[-1].strip().split(",")
+                    cur_completed = int(last_line[0])
+                    if cur_completed >= iterations:
+                        log(f"  [Auto-Resume] {stage_name} already completed all {cur_completed}/{iterations} iterations! Skipping training phase.")
+                        start_iteration = cur_completed + 1
+                    elif cur_completed > 0:
+                        start_iteration = cur_completed + 1
+                        latest_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
+                        if os.path.exists(latest_ckpt):
+                            checkpoint_in = latest_ckpt
+                        log(f"  [Auto-Resume] Detected existing progress in {output_dir}: Resuming from iteration {start_iteration} to {iterations} using {checkpoint_in}")
+        except Exception as e:
+            log(f"  [Auto-Resume Warning] Could not parse existing progress.csv: {e}")
+
+    if start_iteration <= iterations:
+        cmd = [
+            "python3", "in_hand_manipulation/train_ppo.py",
+            "--iterations", str(iterations),
+            "--start_iteration", str(start_iteration),
+            "--num_envs", "16",
+            "--checkpoint", checkpoint_in,
+            "--warmup_iters", "0",
+            "--w_progress", str(w_progress),
+            "--w_precision", str(w_precision),
+            "--w4", str(w4),
+            "--w5", str(w5),
+            "--epsilon_ratio", str(epsilon_ratio),
+            "--max_goal_angle", str(max_goal_angle),
+            "--actor_lr", str(actor_lr),
+            "--critic_lr", str(critic_lr),
+            "--save_freq", "500",
+            "--output_dir", output_dir
+        ]
         
-    log(f"{stage_name} Training Completed!")
-    time.sleep(5)
+        log(f"Launching command: {' '.join(cmd)}")
+        proc = subprocess.Popen(cmd)
+        
+        last_iter_report = (start_iteration // 500) * 500
+        while proc.poll() is None:
+            if os.path.exists(prog_path):
+                try:
+                    with open(prog_path, "r") as f:
+                        lines = [l for l in f.readlines() if l.strip()]
+                        if len(lines) > 1:
+                            last_line = lines[-1].strip().split(",")
+                            cur_iter = int(last_line[0])
+                            if cur_iter - last_iter_report >= 500 or cur_iter >= iterations:
+                                last_iter_report = cur_iter
+                                succ = float(last_line[4]) * 100
+                                drop = float(last_line[5]) * 100
+                                clos = float(last_line[7]) * 100
+                                emi = float(last_line[8])
+                                err = float(last_line[10])
+                                ret = float(last_line[1])
+                                crit = float(last_line[12])
+                                log(f"  [Telemetry Matrix | {stage_name} Iter {cur_iter:05d}/{iterations}] EMI: {emi:.3f} | Succ: {succ:5.1f}% | Drop: {drop:5.1f}% | Clos: {clos:5.1f}% | Err: {err:5.1f}° | CritLoss: {crit:6.2f} | Return: {ret:7.1f}")
+                except Exception:
+                    pass
+            time.sleep(30)
+            
+        log(f"{stage_name} Training Completed!")
+        time.sleep(5)
     
     # Locate best checkpoint
     best_ckpt = os.path.join(output_dir, "ppo_best_actor.pth")
@@ -209,19 +247,22 @@ def run_training_stage(
         
     # Run evaluation
     log(f"Evaluating {stage_name} using {eval_script} on {best_ckpt}...")
-    code, eval_out = run_cmd([
+    eval_cmd = [
         "python3", eval_script,
         "--checkpoint", best_ckpt,
         "--episodes", "25",
         "--no_render"
-    ])
+    ]
+    if "stage2" in eval_script:
+        eval_cmd.extend(["--max_goal_angle", str(max_goal_angle)])
+    code, eval_out = run_cmd(eval_cmd)
     
     summary_text = eval_out[-1500:] if len(eval_out) > 1500 else eval_out
     log(f"Evaluation summary for {stage_name}:\n{summary_text}")
     append_report(stage_name, summary_text)
     
     # Save dedicated backup copy
-    backup_file = os.path.join(output_dir, f"{stage_name.lower().replace(' ', '_').replace('(', '').replace(')', '')}_golden.pth")
+    backup_file = os.path.join(output_dir, f"{stage_name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('%', 'pct')}_golden.pth")
     if os.path.exists(best_ckpt):
         shutil.copy2(best_ckpt, backup_file)
         log(f"Saved golden checkpoint backup to: {backup_file}")
@@ -273,7 +314,7 @@ def main():
 
     # Step 1D (Part 2): Another 10k iterations on 10% error
     s1d2_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10_part2")
-    if not (os.path.exists(s1d2_dir) and os.path.exists(os.path.join(s1d2_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s1d2_dir, "progress.csv")) > 2000000):
+    if not is_stage_fully_completed(s1d2_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 1D (Part 2 - 10k Consolidation)",
             output_dir=s1d2_dir,
@@ -295,7 +336,7 @@ def main():
 
     # Step 1E: Another 10k iterations on 5% error for Stage 1 itself
     s1e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps05")
-    if not (os.path.exists(s1e_dir) and os.path.exists(os.path.join(s1e_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s1e_dir, "progress.csv")) > 2000000):
+    if not is_stage_fully_completed(s1e_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 1E (5% Precision Lock-In)",
             output_dir=s1e_dir,
@@ -334,7 +375,7 @@ def main():
 
     # Stage 2A: 90° at EpsR = 25% (20k iterations)
     s2a_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25")
-    if not (os.path.exists(s2a_dir) and os.path.exists(os.path.join(s2a_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s2a_dir, "progress.csv")) > 4000000):
+    if not is_stage_fully_completed(s2a_dir, 20000):
         current_model = run_training_stage(
             stage_name="Stage 2A (90° Envelope, 25% Error)",
             output_dir=s2a_dir,
@@ -355,7 +396,7 @@ def main():
 
     # Stage 2B: 90° at EpsR = 20% (20k iterations)
     s2b_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps20")
-    if not (os.path.exists(s2b_dir) and os.path.exists(os.path.join(s2b_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s2b_dir, "progress.csv")) > 4000000):
+    if not is_stage_fully_completed(s2b_dir, 20000):
         current_model = run_training_stage(
             stage_name="Stage 2B (90° Envelope, 20% Error)",
             output_dir=s2b_dir,
@@ -376,7 +417,7 @@ def main():
 
     # Stage 2C: 90° at EpsR = 15% (20k iterations)
     s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
-    if not (os.path.exists(s2c_dir) and os.path.exists(os.path.join(s2c_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s2c_dir, "progress.csv")) > 4000000):
+    if not is_stage_fully_completed(s2c_dir, 20000):
         current_model = run_training_stage(
             stage_name="Stage 2C (90° Envelope, 15% Error)",
             output_dir=s2c_dir,
@@ -397,7 +438,7 @@ def main():
 
     # Stage 2D: 90° at EpsR = 10% (20k iterations)
     s2d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps10")
-    if not (os.path.exists(s2d_dir) and os.path.exists(os.path.join(s2d_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s2d_dir, "progress.csv")) > 4000000):
+    if not is_stage_fully_completed(s2d_dir, 20000):
         current_model = run_training_stage(
             stage_name="Stage 2D (90° Envelope, 10% Error)",
             output_dir=s2d_dir,
@@ -418,7 +459,7 @@ def main():
 
     # Stage 2E: 90° at EpsR = 5% (20k iterations)
     s2e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps05")
-    if not (os.path.exists(s2e_dir) and os.path.exists(os.path.join(s2e_dir, "ppo_best_actor.pth")) and os.path.getsize(os.path.join(s2e_dir, "progress.csv")) > 4000000):
+    if not is_stage_fully_completed(s2e_dir, 20000):
         current_model = run_training_stage(
             stage_name="Stage 2E (90° Envelope, 5% Error)",
             output_dir=s2e_dir,
@@ -442,6 +483,7 @@ def main():
     code, stage2_final_eval = run_cmd([
         "python3", "in_hand_manipulation/evaluate_stage2.py",
         "--checkpoint", current_model,
+        "--max_goal_angle", "1.57",
         "--episodes", "50",
         "--no_render"
     ])

@@ -100,6 +100,7 @@ class PPOConfig:
     total_timesteps: int = 1_000_000
     rollout_steps: int = 2048       # Trajectory steps collected per policy iteration (T)
     num_iterations: int = 250       # Total PPO policy iterations
+    start_iteration: int = 1        # Starting iteration count (for resuming interrupted runs)
     num_minibatches: int = 32       # Number of minibatches (e.g. 2048 / 32 = 64 batch size)
     mini_batch_size: int = 64       # Size of each SGD minibatch
     ppo_epochs: int = 5             # Number of optimization epochs per rollout buffer (tuned for fine-tuning stability)
@@ -1057,7 +1058,7 @@ class RolloutBuffer:
 
 class TrainingLogger:
     """Lightweight, non-blocking metrics logger to CSV and JSONL."""
-    def __init__(self, log_dir: str):
+    def __init__(self, log_dir: str, resume: bool = False):
         self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         self.csv_path = os.path.join(log_dir, "progress.csv")
@@ -1069,9 +1070,10 @@ class TrainingLogger:
             "loss_critic", "loss_actor", "entropy", "clip_fraction",
             "approx_kl", "log_std", "elapsed_sec"
         ]
-        with open(self.csv_path, mode="w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
-            writer.writeheader()
+        if not (resume and os.path.exists(self.csv_path) and os.path.getsize(self.csv_path) > 0):
+            with open(self.csv_path, mode="w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+                writer.writeheader()
 
     def log(self, metrics: Dict[str, float]):
         filtered = {k: metrics.get(k, 0.0) for k in self.fieldnames}
@@ -1469,18 +1471,27 @@ class PPOFineTuner:
     def train(self, output_dir: str = "checkpoints_ppo"):
         """Executes the full PPO training curriculum with Critic Warm-Up."""
         os.makedirs(output_dir, exist_ok=True)
-        logger = TrainingLogger(log_dir=output_dir)
+        logger = TrainingLogger(log_dir=output_dir, resume=(self.cfg.start_iteration > 1))
         
         print("\n" + "="*75)
         print("STARTING CONTINUOUS PPO REINFORCEMENT LEARNING FINE-TUNING")
-        print(f"Total Iterations: {self.cfg.num_iterations} | Rollout Steps: {self.cfg.rollout_steps}")
+        print(f"Total Iterations: {self.cfg.num_iterations} (Start: {self.cfg.start_iteration}) | Rollout Steps: {self.cfg.rollout_steps}")
         print(f"Actor LR: {self.cfg.actor_lr:.2e} | Critic LR: {self.cfg.critic_lr:.2e}")
         print(f"Critic Warm-Up Phase: First {self.cfg.warmup_iterations} iterations (Actor Frozen)")
         print(f"Logging progress to: {os.path.join(output_dir, 'progress.csv')}")
         print("="*75 + "\n")
         
         obs = self.vec_env.reset()
-        best_emi_score = getattr(self, "resumed_best_emi", -1.0)
+        best_ckpt_path = os.path.join(output_dir, "ppo_best_actor.pth")
+        if os.path.exists(best_ckpt_path):
+            try:
+                b_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
+                best_emi_score = float(b_ckpt.get("metrics", {}).get("emi_score", -1.0))
+            except Exception:
+                best_emi_score = -1.0
+        else:
+            best_emi_score = -1.0
+
         if best_emi_score > 0:
             print(f"[PPOFineTuner] Checkpoint baseline established: Best EMI = {best_emi_score:.4f} (new saves must exceed this)\n")
         best_composite_score = -float('inf')
@@ -1491,7 +1502,7 @@ class PPOFineTuner:
         start_time = time.time()
         
         try:
-            for iteration in range(1, self.cfg.num_iterations + 1):
+            for iteration in range(self.cfg.start_iteration, self.cfg.num_iterations + 1):
                 iter_start = time.time()
                 is_warmup = (iteration <= self.cfg.warmup_iterations)
                 
@@ -1681,6 +1692,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=str, default="", help="Path to bc_actor_checkpoint.pth")
     parser.add_argument("--scene_xml", type=str, default="", help="Path to scene_cube.xml")
     parser.add_argument("--output_dir", type=str, default="checkpoints_ppo", help="Output directory for checkpoints")
+    parser.add_argument("--start_iteration", type=int, default=1, help="Starting iteration count (useful for resuming interrupted runs)")
     parser.add_argument("--save_freq", type=int, default=100, help="Interval (iterations) to save periodic milestone checkpoints (default: 100)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
@@ -1715,6 +1727,7 @@ def main():
         
     config = PPOConfig(
         num_iterations=args.iterations,
+        start_iteration=args.start_iteration,
         rollout_steps=args.rollout_steps,
         mini_batch_size=args.batch_size,
         ppo_epochs=args.ppo_epochs,

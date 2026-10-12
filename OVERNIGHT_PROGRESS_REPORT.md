@@ -161,3 +161,34 @@ Mean Angular Error:                 66.49° +/- 64.30°
 
 ```
 
+
+## Stage 1E (5% Precision Lock-In) (2026-10-12 18:59:57)
+
+```
+ | Rotational Closure:   0.0% | Status: SUCCESS (<= 2.3°)
+
+[Episode 22/25] Object: 3 | Initial Target Angle:  11.2° | Success Threshold (10%): <= 1.12° | Horizon: 234 steps (4.68s)
+  Finished: Steps: 384/234 | Final Error: 19.38° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.1°)
+
+[Episode 23/25] Object: 2 | Initial Target Angle:  18.0° | Success Threshold (10%): <= 1.80° | Horizon: 261 steps (5.22s)
+  Finished: Steps: 500/261 | Final Error: 20.44° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.8°)
+
+[Episode 24/25] Object: 1 | Initial Target Angle:  21.9° | Success Threshold (10%): <= 2.19° | Horizon: 279 steps (5.58s)
+  Finished: Steps: 374/279 | Final Error: 119.61° | Rotational Closure:   0.0% | Status: SUCCESS (<= 2.2°)
+
+[Episode 25/25] Object: 3 | Initial Target Angle:  13.5° | Success Threshold (10%): <= 1.35° | Horizon: 243 steps (4.86s)
+  Finished: Steps: 402/243 | Final Error: 149.39° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.4°)
+
+======================================================================
+STAGE 1 BENCHMARK SUMMARY (25 Episodes Completed):
+Effective Manipulation Index (EMI): 0.2221  (Retention: 76.0% x Closure: 29.2%)
+Success Rate (<= 10% error):    88.0% (22/25)
+Mean Rotational Closure:             29.2%
+Drop Rate:                           24.0% (6/25)
+Mean Episode Steps:                 432.6 steps (8.65s)
+Mean Angular Error:                 40.78° +/- 43.41°
+======================================================================
+
+
+```
+

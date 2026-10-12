@@ -93,3 +93,40 @@ Mean Angular Error:                 45.92° +/- 49.38°
 
 ```
 
+
+## Stage 1 Final Benchmark (50 Episodes) (2026-10-12 12:34:13)
+
+```
+: 360/360 | Final Error: 46.42° | Rotational Closure:   0.0% | Status: TIMEOUT (46.4° > 3.7°)
+
+[Episode 45/50] Object: 1 | Initial Target Angle:  41.0° | Success Threshold (10%): <= 4.10° | Horizon: 383 steps (7.66s)
+  Finished: Steps: 235/383 | Final Error: 135.83° | Rotational Closure:   0.0% | Status: SUCCESS (<= 4.1°)
+
+[Episode 46/50] Object: 1 | Initial Target Angle:  33.7° | Success Threshold (10%): <= 3.37° | Horizon: 340 steps (6.80s)
+  Finished: Steps: 262/340 | Final Error: 139.67° | Rotational Closure:   0.0% | Status: SUCCESS (<= 3.4°)
+
+[Episode 47/50] Object: 1 | Initial Target Angle:  11.4° | Success Threshold (10%): <= 1.14° | Horizon: 235 steps (4.70s)
+  Finished: Steps: 235/235 | Final Error:  6.71° | Rotational Closure:  40.9% | Status: TIMEOUT (6.7° > 1.1°)
+
+[Episode 48/50] Object: 1 | Initial Target Angle:  10.3° | Success Threshold (10%): <= 1.03° | Horizon: 231 steps (4.62s)
+  Finished: Steps: 242/231 | Final Error: 118.86° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.0°)
+
+[Episode 49/50] Object: 3 | Initial Target Angle:  14.7° | Success Threshold (10%): <= 1.47° | Horizon: 248 steps (4.96s)
+  Finished: Steps: 500/248 | Final Error: 32.89° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.5°)
+
+[Episode 50/50] Object: 3 | Initial Target Angle:  35.4° | Success Threshold (10%): <= 3.54° | Horizon: 350 steps (7.00s)
+  Finished: Steps: 500/350 | Final Error: 11.56° | Rotational Closure:  67.4% | Status: SUCCESS (<= 3.5°)
+
+======================================================================
+STAGE 1 BENCHMARK SUMMARY (50 Episodes Completed):
+Effective Manipulation Index (EMI): 0.1549  (Retention: 68.0% x Closure: 22.8%)
+Success Rate (<= 10% error):    76.0% (38/50)
+Mean Rotational Closure:             22.8%
+Drop Rate:                           32.0% (16/50)
+Mean Episode Steps:                 401.5 steps (8.03s)
+Mean Angular Error:                 55.77° +/- 55.55°
+======================================================================
+
+
+```
+

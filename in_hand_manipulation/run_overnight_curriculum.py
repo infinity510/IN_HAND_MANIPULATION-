@@ -192,69 +192,89 @@ def main():
             f.write("# Overnight Master Curriculum Execution Report\n\n")
 
     # -------------------------------------------------------------
-    # Step 1: Wait for current running Stage 1A (EpsR = 25%) to finish
+    # Stage Check / Auto-Resumption Logic
     # -------------------------------------------------------------
-    wait_for_current_training()
+    s1c_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15", "ppo_best_actor.pth")
+    s1b_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps20", "ppo_best_actor.pth")
+    s1a_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps25", "ppo_best_actor.pth")
     
-    # Backup Stage 1A
-    stage1a_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps25")
-    os.makedirs(stage1a_dir, exist_ok=True)
-    src_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_best_actor.pth")
-    if not os.path.exists(src_ckpt):
-        src_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_latest_actor.pth")
-        
-    dest_ckpt = os.path.join(stage1a_dir, "ppo_best_actor.pth")
-    if os.path.exists(src_ckpt):
-        shutil.copy2(src_ckpt, dest_ckpt)
-        
-    log("Evaluating Stage 1A (EpsR = 25%)...")
-    code, eval_out = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_stage1.py",
-        "--checkpoint", dest_ckpt,
-        "--episodes", "25",
-        "--no_render"
-    ])
-    append_report("Stage 1A (EpsR = 25% Baseline)", eval_out[-1500:])
-    git_commit_and_push("chore(curriculum): Stage 1A (EpsR=25%) completed")
-    current_best_model = dest_ckpt
+    if os.path.exists(s1c_ckpt):
+        log(f"Detected completed Stage 1C checkpoint at: {s1c_ckpt}")
+        log("Skipping Stage 1A, 1B, 1C and proceeding directly to Stage 1D (EpsR = 10%)...")
+        current_best_model = s1c_ckpt
+    elif os.path.exists(s1b_ckpt):
+        log(f"Detected completed Stage 1B checkpoint at: {s1b_ckpt}")
+        log("Resuming into Stage 1C (EpsR = 15%)...")
+        current_best_model = run_training_stage(
+            stage_name="Stage 1C",
+            output_dir=os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15"),
+            checkpoint_in=s1b_ckpt,
+            iterations=10000,
+            epsilon_ratio=0.15,
+            max_goal_angle=0.80,
+            w_progress=4.0,
+            w_precision=2.5,
+            w4=18.0,
+            w5=15.0,
+            actor_lr=1.8e-5,
+            critic_lr=9e-5,
+            eval_script="in_hand_manipulation/evaluate_stage1.py"
+        )
+    else:
+        # Step 1: Wait for current running Stage 1A (EpsR = 25%) to finish
+        wait_for_current_training()
+        stage1a_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps25")
+        os.makedirs(stage1a_dir, exist_ok=True)
+        src_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_best_actor.pth")
+        if not os.path.exists(src_ckpt):
+            src_ckpt = os.path.join(PROJECT_ROOT, "checkpoints_ppo", "ppo_latest_actor.pth")
+        dest_ckpt = os.path.join(stage1a_dir, "ppo_best_actor.pth")
+        if os.path.exists(src_ckpt):
+            shutil.copy2(src_ckpt, dest_ckpt)
+        log("Evaluating Stage 1A (EpsR = 25%)...")
+        code, eval_out = run_cmd([
+            "python3", "in_hand_manipulation/evaluate_stage1.py",
+            "--checkpoint", dest_ckpt,
+            "--episodes", "25",
+            "--no_render"
+        ])
+        append_report("Stage 1A (EpsR = 25% Baseline)", eval_out[-1500:])
+        git_commit_and_push("chore(curriculum): Stage 1A (EpsR=25%) completed")
+        current_best_model = dest_ckpt
 
-    # -------------------------------------------------------------
-    # Step 2: Stage 1B (EpsR = 20%, 10,000 iterations)
-    # -------------------------------------------------------------
-    current_best_model = run_training_stage(
-        stage_name="Stage 1B",
-        output_dir=os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps20"),
-        checkpoint_in=current_best_model,
-        iterations=10000,
-        epsilon_ratio=0.20,
-        max_goal_angle=0.80,
-        w_progress=4.0,
-        w_precision=2.2,
-        w4=16.0,
-        w5=15.0,
-        actor_lr=2e-5,
-        critic_lr=1e-4,
-        eval_script="in_hand_manipulation/evaluate_stage1.py"
-    )
+        # Step 2: Stage 1B (EpsR = 20%, 10,000 iterations)
+        current_best_model = run_training_stage(
+            stage_name="Stage 1B",
+            output_dir=os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps20"),
+            checkpoint_in=current_best_model,
+            iterations=10000,
+            epsilon_ratio=0.20,
+            max_goal_angle=0.80,
+            w_progress=4.0,
+            w_precision=2.2,
+            w4=16.0,
+            w5=15.0,
+            actor_lr=2e-5,
+            critic_lr=1e-4,
+            eval_script="in_hand_manipulation/evaluate_stage1.py"
+        )
 
-    # -------------------------------------------------------------
-    # Step 3: Stage 1C (EpsR = 15%, 10,000 iterations)
-    # -------------------------------------------------------------
-    current_best_model = run_training_stage(
-        stage_name="Stage 1C",
-        output_dir=os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15"),
-        checkpoint_in=current_best_model,
-        iterations=10000,
-        epsilon_ratio=0.15,
-        max_goal_angle=0.80,
-        w_progress=4.0,
-        w_precision=2.5,
-        w4=18.0,
-        w5=15.0,
-        actor_lr=1.8e-5,
-        critic_lr=9e-5,
-        eval_script="in_hand_manipulation/evaluate_stage1.py"
-    )
+        # Step 3: Stage 1C (EpsR = 15%, 10,000 iterations)
+        current_best_model = run_training_stage(
+            stage_name="Stage 1C",
+            output_dir=os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15"),
+            checkpoint_in=current_best_model,
+            iterations=10000,
+            epsilon_ratio=0.15,
+            max_goal_angle=0.80,
+            w_progress=4.0,
+            w_precision=2.5,
+            w4=18.0,
+            w5=15.0,
+            actor_lr=1.8e-5,
+            critic_lr=9e-5,
+            eval_script="in_hand_manipulation/evaluate_stage1.py"
+        )
 
     # -------------------------------------------------------------
     # Step 4: Stage 1D (EpsR = 10%, 10,000 iterations, Target 70%+)
@@ -375,3 +395,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

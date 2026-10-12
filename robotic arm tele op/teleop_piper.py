@@ -2,6 +2,7 @@ import time
 import cv2
 import math
 import numpy as np
+from scipy.spatial.transform import Rotation as R_scipy
 from webcam_aruco_tracker import WebcamArucoTracker
 from piper_sdk import *
 
@@ -29,18 +30,20 @@ def main():
     piper.GripperCtrl(0, 1000, 0x01, 0)
 
     print("Starting Webcam Tracker...")
-    tracker = WebcamArucoTracker(marker_length=0.093, alpha=0.65, camera_index=1)
+    # 5 markers tracked, edge length 0.08m (8cm)
+    tracker = WebcamArucoTracker(marker_length=0.08, alpha=0.65, camera_index=0)
     tracker.start()
     
     print("\n=== SYSTEM READY ===")
     print("1. Manually move the physical arm near the center of your desk.")
-    print("2. Hold the ArUco marker in the camera view.")
+    print("2. Hold the object with ArUco markers in the camera view.")
     print("3. Press 'o' in the video window to lock origin and begin tracking.")
     print("4. Press 'c' to toggle the gripper (Open / Soft Close).")
     print("5. Press 's' to pause movement. Press 'q' to quit.\n")
     
     is_active = False
     origin_pose = None
+    origin_rotation_matrix = None
     error_printed = False
     gripper_is_open = False # Starts closed
 
@@ -57,7 +60,6 @@ def main():
 
     # Exponential Moving Average state for smoothing coordinates
     # Alpha controls smoothness. Lower = smoother but more delay. (0.0 to 1.0)
-    # Changed from 0.15 to 0.05 for extremely smooth, vibration-free tracking
     ema_alpha = 0.05
     ema_target = None
 
@@ -74,6 +76,8 @@ def main():
                 if positions and positions.get(0) is not None:
                     # 1. Capture Camera Origin
                     origin_pose = positions[0].copy()
+                    if tracker.rotation_matrix is not None:
+                        origin_rotation_matrix = tracker.rotation_matrix.copy()
                     
                     # 2. Capture Robot's Current Physical Pose as the new Home
                     current_robot_pose = piper.GetArmEndPoseMsgs()
@@ -90,7 +94,7 @@ def main():
                     print(f"\n>>> Origin locked! Robot Home dynamically set to: X={ROBOT_HOME_X_MM:.1f}mm, Y={ROBOT_HOME_Y_MM:.1f}mm, Z={ROBOT_HOME_Z_MM:.1f}mm <<<")
                     print("Teleoperation ACTIVE.")
                 else:
-                    print("Cannot set origin: ArUco marker (ID: 0) not currently visible.")
+                    print("Cannot set origin: ArUco markers not currently visible.")
             elif key == ord('s'):
                 is_active = False
                 print("Teleoperation PAUSED.")
@@ -110,21 +114,32 @@ def main():
                     current_raw_pose = positions[0]
                     
                     if is_active and origin_pose is not None:
-                        # Calculate physical delta from the captured origin (in meters and radians)
+                        # Position delta from captured origin (meters)
                         dx_m = current_raw_pose[0] - origin_pose[0]
                         dy_m = current_raw_pose[1] - origin_pose[1]
                         dz_m = current_raw_pose[2] - origin_pose[2]
-                        drx_rad = current_raw_pose[3] - origin_pose[3]
-                        dry_rad = current_raw_pose[4] - origin_pose[4]
-                        drz_rad = current_raw_pose[5] - origin_pose[5]
                         
-                        # Convert deltas: meters -> mm, radians -> degrees
+                        # Rotation delta using 3x3 rotation matrix for robustness
+                        if tracker.rotation_matrix is not None and origin_rotation_matrix is not None:
+                            # R_delta = R_current @ R_origin.T
+                            R_delta = tracker.rotation_matrix @ origin_rotation_matrix.T
+                            delta_euler_deg = R_scipy.from_matrix(R_delta).as_euler('xyz', degrees=True)
+                            drx_deg = delta_euler_deg[0]
+                            dry_deg = delta_euler_deg[1]
+                            drz_deg = delta_euler_deg[2]
+                        else:
+                            # Fallback: subtraction of euler angles
+                            drx_rad = current_raw_pose[3] - origin_pose[3]
+                            dry_rad = current_raw_pose[4] - origin_pose[4]
+                            drz_rad = current_raw_pose[5] - origin_pose[5]
+                            drx_deg = math.degrees(drx_rad)
+                            dry_deg = math.degrees(dry_rad)
+                            drz_deg = math.degrees(drz_rad)
+                        
+                        # Convert position deltas: meters -> mm
                         dx_mm = dx_m * 1000.0
                         dy_mm = dy_m * 1000.0
                         dz_mm = dz_m * 1000.0
-                        drx_deg = math.degrees(drx_rad)
-                        dry_deg = math.degrees(dry_rad)
-                        drz_deg = math.degrees(drz_rad)
                         
                         # Apply delta to the robot's home position (in mm and degrees)
                         target_x_mm = ROBOT_HOME_X_MM + dx_mm
@@ -162,7 +177,7 @@ def main():
                         
                         # CRITICAL: Must send MotionCtrl_2 AND EndPoseCtrl together every frame
                         try:
-                            # move_spd_rate_ctrl changed from 100 to 40 for firmware-level smoothing
+                            # move_spd_rate_ctrl at 40 for firmware-level smoothing
                             piper.MotionCtrl_2(0x01, 0x00, 40, 0x00)
                             piper.EndPoseCtrl(x_sdk, y_sdk, z_sdk, rx_sdk, ry_sdk, rz_sdk)
                             print(f"d[{dx_mm:+.1f}, {dy_mm:+.1f}, {dz_mm:+.1f}]mm | SDK: X={x_sdk} Y={y_sdk} Z={z_sdk} RX={rx_sdk} RY={ry_sdk} RZ={rz_sdk}   ", end="\r")

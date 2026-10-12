@@ -192,3 +192,40 @@ Mean Angular Error:                 40.78° +/- 43.41°
 
 ```
 
+
+## Stage 1 Grand Final Benchmark (50 Episodes, Sub-2.5° Tolerance) (2026-10-12 19:01:06)
+
+```
+teps: 384/370 | Final Error: 161.64° | Rotational Closure:   0.0% | Status: SUCCESS (<= 3.9°)
+
+[Episode 45/50] Object: 2 | Initial Target Angle:  15.3° | Success Threshold (10%): <= 1.53° | Horizon: 250 steps (5.00s)
+  Finished: Steps: 500/250 | Final Error: 25.05° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.5°)
+
+[Episode 46/50] Object: 1 | Initial Target Angle:  10.9° | Success Threshold (10%): <= 1.09° | Horizon: 234 steps (4.68s)
+  Finished: Steps: 297/234 | Final Error: 111.41° | Rotational Closure:   0.0% | Status: SUCCESS (<= 1.1°)
+
+[Episode 47/50] Object: 2 | Initial Target Angle:  40.6° | Success Threshold (10%): <= 4.06° | Horizon: 381 steps (7.62s)
+  Finished: Steps: 381/381 | Final Error: 13.55° | Rotational Closure:  66.6% | Status: TIMEOUT (13.6° > 4.1°)
+
+[Episode 48/50] Object: 2 | Initial Target Angle:  43.6° | Success Threshold (10%): <= 4.36° | Horizon: 400 steps (8.00s)
+  Finished: Steps: 500/400 | Final Error:  5.57° | Rotational Closure:  87.2% | Status: SUCCESS (<= 4.4°)
+
+[Episode 49/50] Object: 3 | Initial Target Angle:  21.3° | Success Threshold (10%): <= 2.13° | Horizon: 276 steps (5.52s)
+  Finished: Steps: 276/276 | Final Error: 151.81° | Rotational Closure:   0.0% | Status: SUCCESS (<= 2.1°)
+
+[Episode 50/50] Object: 1 | Initial Target Angle:  23.7° | Success Threshold (10%): <= 2.37° | Horizon: 287 steps (5.74s)
+  Finished: Steps: 259/287 | Final Error: 99.24° | Rotational Closure:   0.0% | Status: SUCCESS (<= 2.4°)
+
+======================================================================
+STAGE 1 BENCHMARK SUMMARY (50 Episodes Completed):
+Effective Manipulation Index (EMI): 0.1307  (Retention: 72.0% x Closure: 18.1%)
+Success Rate (<= 10% error):    82.0% (41/50)
+Mean Rotational Closure:             18.1%
+Drop Rate:                           28.0% (14/50)
+Mean Episode Steps:                 410.9 steps (8.22s)
+Mean Angular Error:                 49.50° +/- 49.30°
+======================================================================
+
+
+```
+

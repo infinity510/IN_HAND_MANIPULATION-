@@ -103,20 +103,26 @@ def _eval_single_episode(seed: int):
             break
             
     final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
-    is_dropped = bool(step_info.get("is_dropped", False))
+    raw_dropped = bool(step_info.get("raw_dropped", False))
     tol_thresh_deg = _worker_epsilon_ratio * init_angle_deg
     is_success = bool(goals_achieved > 0 or final_err_deg <= tol_thresh_deg)
     
+    # Pre-goal drop accounting:
+    # Drops occurring AFTER a goal has already been achieved do NOT count against retention
+    # for the stopping criterion (as instructed: "no dropping before success like if u get success and change target then dont count that in the drop")
+    dropped_before_success = bool(raw_dropped and (goals_achieved == 0))
+    
     if goals_achieved > 0:
         closure = 1.0
-    elif is_dropped:
+    elif raw_dropped:
         closure = 0.0
     else:
         closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
         
     return {
         "success": is_success,
-        "dropped": is_dropped,
+        "dropped_before_success": dropped_before_success,
+        "raw_dropped": raw_dropped,
         "closure": closure,
         "goals": goals_achieved,
         "steps": step,
@@ -138,17 +144,19 @@ def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, sce
         
     n = len(results)
     succ_rate = sum(1 for r in results if r["success"]) / n
-    drop_rate = sum(1 for r in results if r["dropped"]) / n
+    pre_goal_drop_rate = sum(1 for r in results if r["dropped_before_success"]) / n
+    pre_goal_retention = max(0.0, 1.0 - pre_goal_drop_rate)
+    raw_drop_rate = sum(1 for r in results if r["raw_dropped"]) / n
     mean_closure = float(np.mean([r["closure"] for r in results]))
-    retention_rate = max(0.0, 1.0 - drop_rate)
     
-    # Score prioritizing Success Rate and Object Retention
-    score = succ_rate * retention_rate * (0.5 + 0.5 * mean_closure)
+    # Score prioritizing Success Rate and Pre-Goal Retention
+    score = succ_rate * pre_goal_retention * (0.5 + 0.5 * mean_closure)
     
     return {
         "success_rate": succ_rate,
-        "drop_rate": drop_rate,
-        "retention_rate": retention_rate,
+        "pre_goal_drop_rate": pre_goal_drop_rate,
+        "pre_goal_retention": pre_goal_retention,
+        "raw_drop_rate": raw_drop_rate,
         "mean_closure": mean_closure,
         "score": score,
         "episodes": n,
@@ -241,6 +249,15 @@ def main():
             print(f"[Background Evaluator] === Evaluating Checkpoint Iteration {it:05d} ({args.num_episodes} episodes) ===", flush=True)
             t_start = time.time()
             try:
+                # Dynamically retrieve active epsilon_ratio stored in checkpoint
+                active_eps = args.epsilon_ratio
+                try:
+                    payload_meta = torch.load(ckpt_file, map_location="cpu", weights_only=False)
+                    if "config" in payload_meta and "epsilon_ratio" in payload_meta["config"]:
+                        active_eps = float(payload_meta["config"]["epsilon_ratio"])
+                except Exception:
+                    pass
+
                 metrics = evaluate_checkpoint(
                     ckpt_file,
                     num_episodes=args.num_episodes,
@@ -248,15 +265,16 @@ def main():
                     scene_xml_path=args.scene_xml,
                     max_goal_angle=args.max_goal_angle,
                     min_goal_angle=args.min_goal_angle,
-                    epsilon_ratio=args.epsilon_ratio
+                    epsilon_ratio=active_eps
                 )
                 t_eval = time.time() - t_start
                 
                 score = metrics["score"]
                 succ = metrics["success_rate"] * 100
                 clos = metrics["mean_closure"] * 100
-                drop = metrics["drop_rate"] * 100
-                ret = metrics["retention_rate"] * 100
+                pre_drop = metrics["pre_goal_drop_rate"] * 100
+                pre_ret = metrics["pre_goal_retention"] * 100
+                raw_drop = metrics["raw_drop_rate"] * 100
                 
                 # Check for improvement
                 promoted_str = ""
@@ -266,11 +284,11 @@ def main():
                     shutil.copy2(ckpt_file, best_output)
                     promoted_str = "  *** [NEW BEST BENCHMARK MODEL PROMOTED] ***"
                     
-                print(f"  [Iter {it:05d}] Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Drop: {drop:5.1f}% | Score: {score:.4f} ({t_eval:.1f}s){promoted_str}", flush=True)
+                print(f"  [Iter {it:05d} | EpsR {active_eps*100:.1f}%] Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Pre-Drop: {pre_drop:5.1f}% | Pre-Ret: {pre_ret:5.1f}% | Raw-Drop: {raw_drop:5.1f}% | Score: {score:.4f} ({t_eval:.1f}s){promoted_str}", flush=True)
                 
                 # Append to history log
                 with open(eval_log, "a") as f:
-                    f.write(f"{it},{metrics['success_rate']:.4f},{metrics['mean_closure']:.4f},{metrics['drop_rate']:.4f},{metrics['retention_rate']:.4f},{score:.4f},{t_eval:.2f},{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"{it},{active_eps:.4f},{metrics['success_rate']:.4f},{metrics['mean_closure']:.4f},{metrics['pre_goal_drop_rate']:.4f},{metrics['pre_goal_retention']:.4f},{metrics['raw_drop_rate']:.4f},{score:.4f},{t_eval:.2f},{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     
             except Exception as e:
                 print(f"  [Error evaluating checkpoint {ckpt_file}]: {e}", flush=True)

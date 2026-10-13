@@ -145,8 +145,16 @@ def is_stage_fully_completed(stage_dir: str, target_iters: int, target_accuracy:
             with open(eval_hist, "r") as f:
                 lines = [l.strip() for l in f.readlines() if l.strip()]
                 if len(lines) > 1:
-                    last_succ = float(lines[-1].split(",")[1])
-                    if last_succ >= target_accuracy:
+                    last_parts = lines[-1].split(",")
+                    if len(last_parts) >= 10:
+                        eval_eps = float(last_parts[1])
+                        last_succ = float(last_parts[2])
+                        last_ret = float(last_parts[5])
+                    else:
+                        eval_eps = 0.15
+                        last_succ = float(last_parts[1])
+                        last_ret = float(last_parts[4])
+                    if eval_eps <= 0.10 and last_succ >= target_accuracy and last_ret >= 0.70:
                         return True
         except Exception:
             pass
@@ -378,12 +386,14 @@ def main():
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
-    # Stage 2C: 90° at EpsR = 15% (Up to 70,000 iterations or until stable 70% accuracy, 400-iter Critic Warm-Up)
-    s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
-    if not is_stage_fully_completed(s2c_dir, 70000):
+    # Stage 2 Master Unified Run (15% -> 10% -> 5% Error Tolerance Ladder, 70,000 Iteration Total Cap)
+    # Automatically steps down tolerance on plateau, dynamically oversamples harder objects,
+    # and halts when either 70,000 total iterations are reached OR consistently 70%-80% accuracy is achieved at <= 10% error!
+    unified_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
+    if not is_stage_fully_completed(unified_dir, 70000):
         current_model = run_training_stage(
-            stage_name="Stage 2C (90° Envelope, 15% Error)",
-            output_dir=s2c_dir,
+            stage_name="Stage 2 Unified Master Run (15% -> 10% -> 5% Ladder, 70k Cap)",
+            output_dir=unified_dir,
             checkpoint_in=current_model,
             iterations=70000,
             epsilon_ratio=0.15,
@@ -404,63 +414,7 @@ def main():
             eval_script="in_hand_manipulation/evaluate_stage2.py"
         )
     else:
-        current_model = os.path.join(s2c_dir, "ppo_best_actor.pth")
-
-    # Stage 2D: 90° at EpsR = 10% (Up to 70,000 iterations or until stable 70% accuracy, 150-iter Critic Warm-Up)
-    s2d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps10")
-    if not is_stage_fully_completed(s2d_dir, 70000):
-        current_model = run_training_stage(
-            stage_name="Stage 2D (90° Envelope, 10% Error)",
-            output_dir=s2d_dir,
-            checkpoint_in=current_model,
-            iterations=70000,
-            epsilon_ratio=0.10,
-            max_goal_angle=1.57,
-            warmup_iters=150,
-            warmup_max_goal_angle=1.57,
-            warmup_epsilon_ratio=0.10,
-            w1=1.5,
-            w_progress=9.0,
-            w_precision=6.0,
-            w4=50.0,
-            w5=15.0,
-            actor_lr=1.2e-5,
-            critic_lr=6e-5,
-            max_log_std=-2.0,
-            entropy_coef=0.0003,
-            reset_log_std=False,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
-        )
-    else:
-        current_model = os.path.join(s2d_dir, "ppo_best_actor.pth")
-
-    # Stage 2E: 90° at EpsR = 5% (Up to 70,000 iterations or until stable 70% accuracy, 150-iter Critic Warm-Up, Extreme Precision)
-    s2e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps05")
-    if not is_stage_fully_completed(s2e_dir, 70000):
-        current_model = run_training_stage(
-            stage_name="Stage 2E (90° Envelope, 5% Error)",
-            output_dir=s2e_dir,
-            checkpoint_in=current_model,
-            iterations=70000,
-            epsilon_ratio=0.05,
-            max_goal_angle=1.57,
-            warmup_iters=150,
-            warmup_max_goal_angle=1.57,
-            warmup_epsilon_ratio=0.05,
-            w1=1.5,
-            w_progress=9.5,
-            w_precision=7.0,
-            w4=55.0,
-            w5=15.0,
-            actor_lr=1.0e-5,
-            critic_lr=5e-5,
-            max_log_std=-2.0,
-            entropy_coef=0.0003,
-            reset_log_std=False,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
-        )
-    else:
-        current_model = os.path.join(s2e_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(unified_dir, "ppo_best_actor.pth")
 
     # Comprehensive 60-episode Stage 2 Grand Final Verification Benchmark (20 per object)
     log("Running 60-episode Stage 2 Grand Final Verification (Sub-5% Error Margin, All Objects)...")
@@ -471,9 +425,9 @@ def main():
         "--episodes_per_object", "20"
     ])
     append_report("Stage 2 Grand Final Benchmark (60 Episodes, 90° Gaiting, Sub-5% Error)", stage2_final_eval[-2000:])
-    git_commit_and_push("feat(curriculum): Stage 2 full completion through 10k iters per stage and 5% extreme precision (Stage 2E)")
+    git_commit_and_push("feat(curriculum): Stage 2 full completion of Unified Master Run through 70k cap / 70% accuracy at <=10% error")
 
-    log("=== STAGE 2 COMPLETED THROUGH 5% EXTREME PRECISION (STAGE 2E) SUCCESSFULLY! ===")
+    log("=== STAGE 2 UNIFIED MASTER RUN COMPLETED SUCCESSFULLY! ===")
 
 
 if __name__ == "__main__":

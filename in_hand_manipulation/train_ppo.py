@@ -1778,7 +1778,16 @@ class PPOFineTuner:
                         gain = best_emi_score - plateau_benchmark_score
                         if gain < 0.015:
                             old_eps = self.cfg.epsilon_ratio
-                            new_eps = max(0.05, old_eps * 0.90)  # Tighten tolerance by 10%
+                            if old_eps > 0.10:
+                                new_eps = 0.10
+                                ladder_msg = "Escalating Tolerance Ladder: 15% -> 10% Error"
+                            elif old_eps > 0.05:
+                                new_eps = 0.05
+                                ladder_msg = "Escalating Tolerance Ladder: 10% -> 5% Extreme Precision"
+                            else:
+                                new_eps = 0.05
+                                ladder_msg = "Maintained at 5% Extreme Precision (Exploration Kick)"
+                                
                             self.cfg.epsilon_ratio = new_eps
                             self.vec_env.set_epsilon_ratio(new_eps)
                             
@@ -1792,7 +1801,7 @@ class PPOFineTuner:
                             
                             print("\n" + "!"*75)
                             print(f"[PLATEAU BREAKER TRIGGERED @ Iter {iteration}] No improvement (gain {gain:+.4f}) over {self.cfg.plateau_window} iters.")
-                            print(f"  -> Escalating difficulty: Tightened tolerance EpsR {old_eps*100:.1f}% -> {new_eps*100:.1f}%")
+                            print(f"  -> {ladder_msg} (EpsR: {old_eps*100:.1f}% -> {new_eps*100:.1f}%)")
                             print(f"  -> Raised min goal angle: {np.degrees(old_min_angle):.1f}° -> {np.degrees(new_min_angle):.1f}°")
                             print(f"  -> Injected temporary exploration entropy boost (+0.0002 for 250 iters)")
                             print("!"*75 + "\n")
@@ -1808,14 +1817,23 @@ class PPOFineTuner:
                                 elines = [el.strip() for el in ef.readlines() if el.strip()]
                                 if len(elines) > 1:
                                     elast = elines[-1].split(",")
-                                    b_succ = float(elast[1])
-                                    b_ret = float(elast[4])
-                                    if b_succ >= self.cfg.target_accuracy and b_ret >= 0.70:
+                                    # Support both 10-col new schema and 8-col legacy schema
+                                    if len(elast) >= 10:
+                                        eval_eps = float(elast[1])
+                                        b_succ = float(elast[2])
+                                        b_ret = float(elast[5])
+                                    else:
+                                        eval_eps = self.cfg.epsilon_ratio
+                                        b_succ = float(elast[1])
+                                        b_ret = float(elast[4])
+                                        
+                                    if eval_eps <= 0.10 and b_succ >= self.cfg.target_accuracy and b_ret >= 0.70:
                                         print("\n" + "*"*75)
-                                        print(f"[TARGET ACCURACY ACHIEVED @ Iter {iteration}] Background benchmark confirmed {b_succ*100:.1f}% success rate (>= {self.cfg.target_accuracy*100:.0f}%) and {b_ret*100:.1f}% retention!")
+                                        print(f"[TARGET ACCURACY ACHIEVED @ Iter {iteration}] Background benchmark confirmed {b_succ*100:.1f}% success rate (>= {self.cfg.target_accuracy*100:.0f}%) at {eval_eps*100:.1f}% error tolerance with {b_ret*100:.1f}% pre-goal retention!")
                                         print(f"Stage objective fully mastered. Saving golden checkpoint...")
                                         print("*"*75 + "\n")
                                         self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
+                                        self.save_checkpoint(os.path.join(output_dir, "unified_curriculum_golden.pth"), iteration, rollout_metrics)
                                         break
                         except Exception:
                             pass

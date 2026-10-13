@@ -1081,6 +1081,41 @@ During extended reinforcement learning on complex multi-object manipulation task
   - The stage continuously trains until the 500-episode background benchmark logs **$\ge 70.0\%$ success rate and $\ge 70.0\%$ retention rate** across all 3 objects.
   - Hard safety ceiling capped at **70,000 iterations per stage** (`cap_iterations = 70000`).
 
+---
+
+## 32. Unified 70k Curriculum Architecture: Discrete Plateau Ladder ($15\% \to 10\% \to 5\%$) and Pre-Goal Retention Gate
+
+### 1. Architectural Philosophy: One Continuous Run (No Restarts)
+Rather than fragmenting training into multiple independent stage scripts that reset the iteration counter and require manual monitoring, the system implements a **single, unified, autonomous execution pipeline** governed by:
+- **Global Iteration Cap**: Exactly 70,000 total iterations across the entire curriculum run (`iteration >= 70000`).
+- **In-Place Dynamic Difficulty Escalation**: Changes to tolerances and sampling distributions occur dynamically inside the vectorized environments during live training without restarting the process or resetting network state.
+
+### 2. Discrete Plateau Escalation Ladder
+When the rolling 2,500-iteration performance monitor detects an EMI gain $< 0.015$, the trainer steps down difficulty through an explicit, discrete ladder:
+1. **Initial Phase ($15\%$ Error Tolerance, $\epsilon_{\text{ratio}} = 0.15$)**:
+   - Broad tolerance envelope allowing the policy to master initial coordination and stable finger gaiting.
+2. **First Escalation ($10\%$ Error Tolerance, $\epsilon_{\text{ratio}} = 0.10$)**:
+   - Triggered upon reaching a plateau at $15\%$. Strips loose alignment bonuses and forces sub-sub-$6^\circ$ precision on nominal $60^\circ$ pivots.
+3. **Second Escalation ($5\%$ Extreme Precision, $\epsilon_{\text{ratio}} = 0.05$)**:
+   - Triggered upon reaching a plateau at $10\%$. Demands surgical finger tip control ($< 3^\circ$ error).
+4. **Basin Agitation at $5\%$ Floor**:
+   - If plateaued at $5\%$, raises the minimum goal rotation floor ($\theta_{\min} \leftarrow \min(0.95, \theta_{\min} + 0.05\text{ rad})$) and injects a $+0.0002$ entropy boost for 250 iterations to break deterministic local minima.
+
+### 3. Pre-Goal Drop Accounting for Stopping Decisions
+In continuous goal resampling environments (OpenAI Dactyl protocol), when a policy achieves its first target orientation, a new target is sampled immediately to allow multi-goal chaining. A policy that successfully scores a goal and then loses contact while attempting an ambitious second goal has already demonstrated task mastery for that episode.
+
+To align the automated stopping decision with true competence:
+- **Pre-Goal Drop**:
+  $$\text{dropped\_before\_success} = \text{bool}(\text{raw\_dropped} \land (\text{goals\_achieved} == 0))$$
+- **Pre-Goal Retention**:
+  $$\text{pre\_goal\_retention} = 1.0 - \frac{1}{N}\sum_{i=1}^N \text{dropped\_before\_success}_i$$
+- **Stopping Rule**:
+  The entire unified run terminates if:
+  1. **Total iterations reach 70,000**, OR
+  2. The background 500-episode benchmark confirms:
+     $$\epsilon_{\text{ratio}} \le 0.10 \quad \land \quad \text{success\_rate} \ge 70.0\% \quad \land \quad \text{pre\_goal\_retention} \ge 70.0\%$$
+
+
 
 
 

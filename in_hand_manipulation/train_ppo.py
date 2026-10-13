@@ -71,18 +71,18 @@ except ImportError:
 @dataclass
 class RewardWeights:
     """
-    Reward function coefficients according to the user specification:
-    r_t = - w1*(d_theta) - w2*||a_t||^2 - w3*||qdot_t||^2
-          + w4*I(d_theta < epsilon) - w5*I(dist_to_palm > drop_threshold or obj_z < min_height)
-          + w6*n_c - w7*I(n_c == 0)
+    Reward function coefficients with convex orientation closure & accelerating progress:
+    r_t = w1*(closure^2 + 0.5*closure^4) + w_progress*delta_theta*accel + w_precision*multi_exp
+          - w2*||a_t||^2 - w_action_rate*||da_t||^2 - w3*||qdot_t||^2
+          + w4*I(d_theta < epsilon) - w5*I(dropped) + w6*n_c - w7*I(n_c == 0)
     """
-    w1: float = 1.0     # Angular distance penalty weight: penalizes rotational error d_theta
-    w_progress: float = 2.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
-    w_precision: float = 2.0 # Exponential precision guidance reward weight: non-linear gradient pulling policy out of 28 deg basin
+    w1: float = 1.5     # Convex orientation closure weight: rewards higher closure at super-linear rate
+    w_progress: float = 8.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
+    w_precision: float = 4.0 # Multi-scale exponential precision guidance reward weight
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
     w_action_rate: float = 0.002 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
-    w4: float = 10.0    # Terminal success bonus: large positive reward upon reaching goal orientation
+    w4: float = 40.0    # Terminal success bonus: large positive reward upon reaching goal orientation
     w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
     w6: float = 0.05    # Proportional contact reward: encourages multi-fingered contact points (n_c)
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
@@ -106,11 +106,13 @@ class PPOConfig:
     ppo_epochs: int = 5             # Number of optimization epochs per rollout buffer (tuned for fine-tuning stability)
     
     # Critic Warm-Up
-    warmup_iterations: int = 30     # Number of initial iterations where Actor is frozen (increased to 30 for value calibration)
+    warmup_iterations: int = 300    # Number of initial iterations where Actor is frozen for value calibration
+    warmup_max_goal_angle: Optional[float] = None # Optional goal angle cap during warmup (e.g. 0.785 rad = 45 deg)
+    warmup_epsilon_ratio: Optional[float] = None  # Optional epsilon ratio during warmup (e.g. 0.10 = 10%)
     
     # Optimization Learning Rates
-    actor_lr: float = 2e-5          # Conservative learning rate to preserve BC demonstration gaits
-    critic_lr: float = 1e-4         # Stabilized learning rate for value function fitting
+    actor_lr: float = 1.6e-5        # Conservative learning rate to preserve BC demonstration gaits
+    critic_lr: float = 8e-5         # Stabilized learning rate for value function fitting
     max_grad_norm: float = 0.5      # Gradient clipping threshold for stability
     
     # PPO and GAE Mathematics
@@ -119,8 +121,10 @@ class PPOConfig:
     clip_eps: float = 0.2           # PPO clipping parameter epsilon (can be 0.1 for tighter updates)
     target_kl: Optional[float] = 0.025 # Early-stopping threshold on epoch-mean approx_kl (protects BC weights)
     value_coef: float = 0.5         # Critic loss weight c1
-    entropy_coef: float = 0.001     # Entropy bonus weight c2
-    initial_log_std: float = -2.8   # Safe exploration for fine-tuning BC policy (sigma ~= 0.061 rad / 3.5 deg)
+    entropy_coef: float = 0.0003    # Entropy bonus weight c2 (reduced to prevent noise drift)
+    initial_log_std: float = -2.2   # Safe exploration for fine-tuning policy (sigma ~= 0.11 rad / 6.3 deg)
+    max_log_std: float = -2.0       # Hard upper ceiling on log_std to prevent high-frequency finger tremor
+    reset_log_std: bool = False     # If True, resets loaded log_std to initial_log_std
     
     # Environment & Dimension Definitions
     obs_dim: int = 39               # 12 qpos + 12 qvel + 3 obj_pos + 4 obj_quat + 4 target_quat + 4 phys_params
@@ -141,10 +145,11 @@ class PPOConfig:
     min_goal_angle: float = 0.60     # Minimum goal rotation angle floor in radians (~34.4 degrees)
     target_max_goal_angle: float = 1.40 # Target max goal angle in radians (~80.2 degrees, matches BC demo envelope)
     curriculum_goal_angle: bool = False # If True, adaptively expands/contracts max_goal_angle based on proficiency
-    w_progress: float = 2.0          # Angular progress reward weight
-    w_precision: float = 2.0         # Exponential precision guidance reward weight
+    w1: float = 1.5                  # Convex orientation closure reward weight
+    w_progress: float = 8.0          # Accelerating angular progress reward weight
+    w_precision: float = 4.0         # Multi-scale exponential precision guidance reward weight
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
-    w4: float = 10.0                 # Terminal success bonus weight
+    w4: float = 40.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
@@ -227,6 +232,14 @@ class DeltoInHandManipulationEnv:
         
         # Resolve Gripper Joints & Actuator IDs
         self.joint_names = self._get_gripper_joint_names()
+        self.jnt_ids = [self.model.joint(name).id for name in self.joint_names]
+        self.jnt_qpos_addrs = [self.model.jnt_qposadr[jid] for jid in self.jnt_ids]
+        self.jnt_min = np.array([self.model.jnt_range[jid, 0] for jid in self.jnt_ids], dtype=np.float32)
+        self.jnt_max = np.array([self.model.jnt_range[jid, 1] for jid in self.jnt_ids], dtype=np.float32)
+        # Keep a 2-degree (0.035 rad) safety margin inside hardware hard-stops to prevent servo stall
+        self.safe_jnt_min = self.jnt_min + 0.035
+        self.safe_jnt_max = self.jnt_max - 0.035
+        self.jnt_span = np.maximum(self.jnt_max - self.jnt_min, 1e-4)
         self.actuator_ids = [
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{name.replace('gripper_', '').replace('_joint', '')}")
             for name in self.joint_names
@@ -480,10 +493,10 @@ class DeltoInHandManipulationEnv:
         """
         self.step_count += 1
         
-        # 1. Action Application with Safety Delta Clipping (prevents kinematic thrashing)
-        current_qpos = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names])
+        # 1. Action Application with Safety Delta Clipping & Hardware Joint Limit Clamping
+        current_qpos = np.array([self.data.qpos[addr] for addr in self.jnt_qpos_addrs], dtype=np.float32)
         delta_q = np.clip(action - current_qpos, -0.15, 0.15)
-        safe_action = current_qpos + delta_q
+        safe_action = np.clip(current_qpos + delta_q, self.safe_jnt_min, self.safe_jnt_max)
         
         for i, aid in enumerate(self.actuator_ids):
             if aid != -1:
@@ -497,7 +510,8 @@ class DeltoInHandManipulationEnv:
         obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object_id}_joint").id]
         obj_pos = self.data.qpos[obj_idx:obj_idx+3]
         obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
-        r_qvel = np.array([self.data.qvel[self.model.jnt_dofadr[self.model.joint(j).id]] for j in self.joint_names])
+        post_qpos = np.array([self.data.qpos[addr] for addr in self.jnt_qpos_addrs], dtype=np.float32)
+        r_qvel = np.array([self.data.qvel[self.model.jnt_dofadr[jid]] for jid in self.jnt_ids], dtype=np.float32)
         
         # 4. Compute Metrics for Reward Function
         w = self.reward_weights
@@ -505,16 +519,26 @@ class DeltoInHandManipulationEnv:
         # (a) Geodesic Angular Distance: d_theta
         d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
         
-        # (a2) Angular Progress Reward (Velocity toward goal: positive when rotating closer)
-        angular_progress = float(self.prev_d_theta - d_theta)
-        progress_reward = w.w_progress * angular_progress
+        # Step-level Rotational Closure ratio in [0.0, 1.0]
+        step_closure = float(np.clip(1.0 - (d_theta / (self.initial_d_theta + 1e-6)), 0.0, 1.0))
         
-        # (a3) Exponential Precision Guidance Reward: non-linear gradient pulling out of 28 deg basin
-        # At 30 deg (~0.52 rad): exp(-0.52/0.20) = exp(-2.6) = 0.074 -> +0.15
-        # At 10 deg (~0.17 rad): exp(-0.17/0.20) = exp(-0.85) = 0.427 -> +0.85
-        # At 5 deg (~0.087 rad): exp(-0.087/0.20) = exp(-0.435) = 0.647 -> +1.29
-        # At 1 deg (~0.017 rad): exp(-0.017/0.20) = exp(-0.085) = 0.919 -> +1.84
-        precision_reward = w.w_precision * float(np.exp(-d_theta / 0.20))
+        # (a1) Convex Orientation Closure Reward:
+        # Eliminates the flat alive-bonus stalling trap! Scales super-linearly as object nears goal orientation:
+        # 0% closure -> +0.00, 40% closure -> +0.29, 70% closure -> +0.92, 100% closure -> +2.25
+        orientation_reward = w.w1 * float(step_closure ** 2 + 0.5 * (step_closure ** 4))
+        
+        # (a2) Accelerating Angular Progress Reward:
+        # Multiplier grows super-linearly from ~1x at start up to ~4.5x near goal orientation:
+        # User requested: "increase the reward by more rate as it gets closer to the desired orientation"
+        angular_progress = float(self.prev_d_theta - d_theta)
+        progress_accel = 1.0 + 2.0 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
+        progress_reward = w.w_progress * angular_progress * progress_accel
+        
+        # (a3) Multi-Scale Exponential Precision Guidance Reward:
+        # Broad 0.45 rad capture funnel + steep 0.18 rad terminal lock-in accelerator:
+        precision_reward = w.w_precision * float(
+            0.4 * np.exp(-d_theta / 0.45) + 0.6 * np.exp(-d_theta / 0.18)
+        )
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -523,6 +547,13 @@ class DeltoInHandManipulationEnv:
         action_diff_sq = float(np.sum(np.square(action - self.prev_action)))
         action_rate_penalty = w.w_action_rate * action_diff_sq
         self.prev_action = action.copy()
+        
+        # (b3) Hardware Joint-Limit Proximity & Over-Command Penalty:
+        # Prevents motors from stalling against mechanical stops or learning hyper-bends
+        norm_qpos = (post_qpos - self.jnt_min) / self.jnt_span
+        limit_prox = np.maximum(0.0, 0.08 - norm_qpos) + np.maximum(0.0, norm_qpos - 0.92)
+        over_cmd = np.maximum(0.0, self.safe_jnt_min - action) + np.maximum(0.0, action - self.safe_jnt_max)
+        joint_limit_penalty = 0.25 * float(np.sum(np.square(limit_prox / 0.08))) + 0.04 * float(np.sum(np.square(over_cmd)))
         
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
@@ -540,7 +571,7 @@ class DeltoInHandManipulationEnv:
         term_success_bonus = 0.0
         if is_success_this_step:
             self.episode_successes += 1
-            term_success_bonus = w.w4  # Success bonus (+10.0)
+            term_success_bonus = w.w4  # Success bonus (+40.0)
             # Continuous Goal Resampling (OpenAI Dactyl standard):
             # When target orientation is reached, immediately sample a new target orientation
             # so the agent can score multiple successive goals per episode without being penalized by early termination!
@@ -562,11 +593,12 @@ class DeltoInHandManipulationEnv:
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         
         reward = (
-            (w.w1 * (np.pi - d_theta))
+            orientation_reward
             + progress_reward
             + precision_reward
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
+            - joint_limit_penalty
             - (w.w3 * vel_norm_sq)
             + term_success_bonus
             - drop_penalty
@@ -598,10 +630,12 @@ class DeltoInHandManipulationEnv:
             "contacts": n_c,
             "is_success": (self.episode_successes > 0),
             "successes_in_episode": self.episode_successes,
-            "is_dropped": is_dropped,
+            "is_dropped": bool(is_dropped and self.episode_successes < 2),
+            "raw_dropped": is_dropped,
             "reward_components": {
-                "angular_reward": (w.w1 * (np.pi - d_theta)),
+                "angular_reward": orientation_reward,
                 "progress_reward": progress_reward,
+                "precision_reward": precision_reward,
                 "control_penalty": - (w.w2 * control_norm_sq),
                 "action_rate_penalty": - action_rate_penalty,
                 "velocity_penalty": - (w.w3 * vel_norm_sq),
@@ -800,10 +834,11 @@ class ActorNetwork(nn.Module):
       mu_head: Linear(256, 12)
       log_std: nn.Parameter(torch.full((12,), -2.3))  [sigma ~= 0.1 rad]
     """
-    def __init__(self, obs_dim: int = 39, act_dim: int = 12):
+    def __init__(self, obs_dim: int = 39, act_dim: int = 12, max_log_std: float = -2.0):
         super(ActorNetwork, self).__init__()
         self.obs_dim = obs_dim
         self.act_dim = act_dim
+        self.max_log_std = max_log_std
         
         # Backbone (Identical to train_bc.py)
         self.net = nn.Sequential(
@@ -838,8 +873,9 @@ class ActorNetwork(nn.Module):
     def get_action_distribution(self, state: torch.Tensor) -> Normal:
         """Constructs PyTorch Normal distribution pi(a | s)."""
         mu = self.forward(state)
-        # Standard deviation is bounded to prevent numerical instability
-        std = torch.clamp(self.log_std.exp(), min=1e-3, max=1.0)
+        # Standard deviation is bounded to prevent numerical instability and finger tremor
+        clamped_log_std = torch.clamp(self.log_std, min=-3.5, max=self.max_log_std)
+        std = torch.clamp(clamped_log_std.exp(), min=1e-3, max=1.0)
         return Normal(mu, std)
 
     def act(self, state: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1101,13 +1137,17 @@ class PPOFineTuner:
         print(f"[PPOFineTuner] Using compute device: {self.device}")
         
         # 1. Initialize Actor and Critic Networks
-        self.actor = ActorNetwork(obs_dim=self.cfg.obs_dim, act_dim=self.cfg.act_dim).to(self.device)
+        self.actor = ActorNetwork(
+            obs_dim=self.cfg.obs_dim,
+            act_dim=self.cfg.act_dim,
+            max_log_std=self.cfg.max_log_std
+        ).to(self.device)
         self.critic = CriticNetwork(obs_dim=self.cfg.obs_dim).to(self.device)
         
         # 2. Instantiate Dual Optimizers (Decoupled learning rates)
-        # Conservative Actor LR (3e-5) prevents policy degradation
+        # Conservative Actor LR (1.6e-5) prevents policy degradation
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=self.cfg.actor_lr, eps=1e-5)
-        # Standard Critic LR (3e-4) learns value functions rapidly
+        # Standard Critic LR (8e-5) learns value functions rapidly
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=self.cfg.critic_lr, eps=1e-5)
         
         # 3. Load Behavior Cloning Checkpoint & Init Parameters (resumes Critic & Optimizers if present)
@@ -1123,6 +1163,10 @@ class PPOFineTuner:
         )
         
         # 5. Instantiate MuJoCo Environment (Single-Process or Multi-Core Vectorized)
+        is_init_warmup = (self.cfg.warmup_iterations > 0 and self.cfg.start_iteration <= self.cfg.warmup_iterations)
+        init_goal_angle = (self.cfg.warmup_max_goal_angle if (is_init_warmup and self.cfg.warmup_max_goal_angle is not None) else self.cfg.max_goal_angle)
+        init_eps_ratio = (self.cfg.warmup_epsilon_ratio if (is_init_warmup and self.cfg.warmup_epsilon_ratio is not None) else self.cfg.epsilon_ratio)
+        
         def make_env_fn():
             return DeltoInHandManipulationEnv(
                 scene_xml_path=self.scene_xml_path,
@@ -1130,8 +1174,9 @@ class PPOFineTuner:
                 obs_std=self.obs_std,
                 reward_weights=RewardWeights(
                     epsilon=self.cfg.epsilon,
-                    epsilon_ratio=self.cfg.epsilon_ratio,
+                    epsilon_ratio=init_eps_ratio,
                     min_abs_epsilon=0.015,
+                    w1=self.cfg.w1,
                     w_progress=self.cfg.w_progress,
                     w_precision=self.cfg.w_precision,
                     w_action_rate=self.cfg.w_action_rate,
@@ -1141,7 +1186,7 @@ class PPOFineTuner:
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
                 dr_ratio=self.cfg.dr_ratio,
-                max_goal_angle=self.cfg.max_goal_angle,
+                max_goal_angle=init_goal_angle,
                 steps_per_radian=self.cfg.steps_per_radian,
                 bonus_steps_per_success=self.cfg.bonus_steps_per_success,
                 max_steps_cap=self.cfg.max_steps_cap,
@@ -1153,13 +1198,13 @@ class PPOFineTuner:
             print(f"[PPOFineTuner] Spawning {self.cfg.num_envs} parallel MuJoCo worker processes...")
             self.vec_env = SubprocVecEnv([make_env_fn for _ in range(self.cfg.num_envs)])
             
-        # 6. Persistent Telemetry Queues across rollout boundaries
-        self.recent_returns = deque(maxlen=50)
-        self.recent_lengths = deque(maxlen=50)
-        self.recent_successes = deque(maxlen=50)
-        self.recent_drops = deque(maxlen=50)
-        self.recent_errors_deg = deque(maxlen=50)
-        self.recent_closures = deque(maxlen=50)
+        # 6. Persistent Telemetry Queues across rollout boundaries (maxlen=100 for smooth rolling metrics)
+        self.recent_returns = deque(maxlen=100)
+        self.recent_lengths = deque(maxlen=100)
+        self.recent_successes = deque(maxlen=100)
+        self.recent_drops = deque(maxlen=100)
+        self.recent_errors_deg = deque(maxlen=100)
+        self.recent_closures = deque(maxlen=100)
         self.ep_returns = np.zeros(self.cfg.num_envs, dtype=np.float32)
         self.ep_lengths = np.zeros(self.cfg.num_envs, dtype=np.int32)
 
@@ -1202,16 +1247,23 @@ class PPOFineTuner:
                     print("[PPOFineTuner] Actor optimizer state successfully restored.")
                 except Exception as e:
                     print(f"[PPOFineTuner] Note: Could not restore actor optimizer state: {e}")
-            if "log_std" in checkpoint:
+            if "log_std" in checkpoint and not self.cfg.reset_log_std:
                 with torch.no_grad():
                     self.actor.log_std.copy_(torch.as_tensor(checkpoint["log_std"], device=self.device))
+            else:
+                with torch.no_grad():
+                    self.actor.log_std.fill_(self.cfg.initial_log_std)
         else:
             with torch.no_grad():
                 self.actor.log_std.fill_(self.cfg.initial_log_std)
+                
+        # Enforce hard upper bound on log_std to eliminate finger tremors
+        with torch.no_grad():
+            self.actor.log_std.clamp_(min=-3.5, max=self.cfg.max_log_std)
             
         print(f"[PPOFineTuner] Actor weights loaded successfully.")
         print(f"[PPOFineTuner] Actor log_std set to: {self.actor.log_std.data.cpu().numpy()[0]:.2f} "
-              f"(sigma ~= {self.actor.log_std.exp().data.cpu().numpy()[0]:.4f} rad)")
+              f"(sigma ~= {self.actor.log_std.exp().data.cpu().numpy()[0]:.4f} rad, max_cap={self.cfg.max_log_std:.2f})")
         
         obs_mean = checkpoint.get("obs_mean", np.zeros(self.cfg.obs_dim, dtype=np.float32)).copy()
         obs_std = checkpoint.get("obs_std", np.ones(self.cfg.obs_dim, dtype=np.float32)).copy()
@@ -1448,6 +1500,10 @@ class PPOFineTuner:
                 nn.utils.clip_grad_norm_(self.actor.parameters(), self.cfg.max_grad_norm)
                 self.actor_optimizer.step()
                 
+                # Enforce hard upper bound on log_std after optimizer step
+                with torch.no_grad():
+                    self.actor.log_std.clamp_(min=-3.5, max=self.cfg.max_log_std)
+                
                 actor_losses.append(actor_loss.item())
                 entropies.append(mean_entropy.item())
 
@@ -1506,8 +1562,32 @@ class PPOFineTuner:
                 iter_start = time.time()
                 is_warmup = (iteration <= self.cfg.warmup_iterations)
                 
+                # Dynamic Transition from Warm-Up Envelope to Full Target Envelope
+                if iteration == self.cfg.warmup_iterations + 1 and self.cfg.warmup_iterations > 0:
+                    print("\n" + "#"*75)
+                    print(f"[WARM-UP COMPLETE @ Iter {iteration}] Transitioning to Full Target Envelope & Unfreezing Actor:")
+                    print(f"  -> Max Goal Angle: {self.cfg.max_goal_angle:.3f} rad ({np.degrees(self.cfg.max_goal_angle):.1f}°)")
+                    print(f"  -> Target Error Tolerance (EpsR): {self.cfg.epsilon_ratio*100:.1f}%")
+                    print("#"*75 + "\n")
+                    self.vec_env.set_max_goal_angle(self.cfg.max_goal_angle)
+                    self.vec_env.set_epsilon_ratio(self.cfg.epsilon_ratio)
+                    # Clear warmup telemetry queues so post-warmup rolling stats are 100% pure
+                    self.recent_returns.clear()
+                    self.recent_lengths.clear()
+                    self.recent_successes.clear()
+                    self.recent_drops.clear()
+                    self.recent_errors_deg.clear()
+                    self.recent_closures.clear()
+                    self.ep_returns.fill(0.0)
+                    self.ep_lengths.fill(0)
+                    obs = self.vec_env.reset()
+                
                 # Phase A: Trajectory Rollout Collection
                 obs, rollout_metrics = self.collect_rollouts(obs)
+                
+                # Report actual active epsilon_ratio during warmup
+                if is_warmup and self.cfg.warmup_epsilon_ratio is not None:
+                    rollout_metrics["epsilon_ratio"] = self.cfg.warmup_epsilon_ratio
                 
                 # Phase B: PPO Policy & Value Updates
                 update_metrics = self.update_policy(is_warmup=is_warmup)
@@ -1556,7 +1636,8 @@ class PPOFineTuner:
                 
                 # Model Checkpointing governed by Effective Manipulation Index (EMI)
                 # EMI = Retention Rate (1 - Drop) * Rotational Closure (1 - final_d_theta / init_d_theta)
-                if not is_warmup:
+                # Require at least 50 completed episodes in rolling window to prevent small-sample post-warmup spikes
+                if not is_warmup and len(self.recent_closures) >= 50:
                     emi = rollout_metrics["emi_score"]
                     if emi > best_emi_score:
                         best_emi_score = emi
@@ -1659,12 +1740,17 @@ def parse_args():
     parser.add_argument("--rollout_steps", type=int, default=2048, help="Rollout buffer steps per iteration")
     parser.add_argument("--batch_size", type=int, default=64, help="Minibatch size for SGD updates")
     parser.add_argument("--ppo_epochs", type=int, default=5, help="Epochs per rollout update (default: 5)")
-    parser.add_argument("--warmup_iters", type=int, default=30, help="Critic warm-up iterations where Actor is frozen (default: 30)")
-    parser.add_argument("--actor_lr", type=float, default=2e-5, help="Actor learning rate (default: 2e-5)")
-    parser.add_argument("--critic_lr", type=float, default=1e-4, help="Critic learning rate (default: 1e-4)")
+    parser.add_argument("--warmup_iters", type=int, default=300, help="Critic warm-up iterations where Actor is frozen (default: 300)")
+    parser.add_argument("--warmup_max_goal_angle", type=float, default=None, help="Optional goal angle cap during warmup in radians (e.g. 0.785 = 45 deg)")
+    parser.add_argument("--warmup_epsilon_ratio", type=float, default=None, help="Optional error tolerance ratio during warmup (e.g. 0.10 = 10%%)")
+    parser.add_argument("--actor_lr", type=float, default=1.6e-5, help="Actor learning rate (default: 1.6e-5)")
+    parser.add_argument("--critic_lr", type=float, default=8e-5, help="Critic learning rate (default: 8e-5)")
     parser.add_argument("--clip_eps", type=float, default=0.2, help="PPO clipping epsilon")
     parser.add_argument("--target_kl", type=float, default=0.025, help="Target KL divergence for early stopping (default: 0.025)")
-    parser.add_argument("--log_std", type=float, default=-2.8, help="Initial log std for Gaussian exploration (default: -2.8)")
+    parser.add_argument("--entropy_coef", type=float, default=0.0003, help="Entropy bonus coefficient (default: 0.0003)")
+    parser.add_argument("--log_std", type=float, default=-2.2, help="Initial log std for Gaussian exploration (default: -2.2)")
+    parser.add_argument("--max_log_std", type=float, default=-2.0, help="Hard upper cap on log_std to prevent finger tremor (default: -2.0)")
+    parser.add_argument("--reset_log_std", action="store_true", help="Reset loaded log_std to initial_log_std")
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel MuJoCo environments (default: 8 for 10x-15x speedup; set to 1 for render mode)")
     parser.add_argument("--epsilon", type=float, default=0.35, help="Fallback orientation success threshold in radians (default: 0.35 rad ~= 20 deg)")
@@ -1678,10 +1764,11 @@ def parse_args():
     parser.add_argument("--target_max_goal_angle", type=float, default=1.40, help="Target maximum goal angle in radians (default: 1.40 rad ~= 80.2 deg)")
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum contracting epsilon ratio from 25%% down to 3%% based on closure")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")
-    parser.add_argument("--w_progress", type=float, default=2.0, help="Angular progress reward weight (default: 2.0)")
-    parser.add_argument("--w_precision", type=float, default=2.0, help="Exponential precision guidance reward weight (default: 2.0)")
+    parser.add_argument("--w1", type=float, default=1.5, help="Convex orientation closure reward weight (default: 1.5)")
+    parser.add_argument("--w_progress", type=float, default=8.0, help="Accelerating angular progress reward weight (default: 8.0)")
+    parser.add_argument("--w_precision", type=float, default=4.0, help="Multi-scale exponential precision guidance reward weight (default: 4.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
-    parser.add_argument("--w4", type=float, default=10.0, help="Terminal success bonus weight (default: 10.0)")
+    parser.add_argument("--w4", type=float, default=40.0, help="Terminal success bonus weight (default: 40.0)")
     parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
@@ -1732,11 +1819,16 @@ def main():
         mini_batch_size=args.batch_size,
         ppo_epochs=args.ppo_epochs,
         warmup_iterations=args.warmup_iters,
+        warmup_max_goal_angle=args.warmup_max_goal_angle,
+        warmup_epsilon_ratio=args.warmup_epsilon_ratio,
         actor_lr=args.actor_lr,
         critic_lr=args.critic_lr,
         clip_eps=args.clip_eps,
         target_kl=args.target_kl,
+        entropy_coef=args.entropy_coef,
         initial_log_std=args.log_std,
+        max_log_std=args.max_log_std,
+        reset_log_std=args.reset_log_std,
         max_episode_steps=args.max_steps,
         steps_per_radian=args.steps_per_radian,
         bonus_steps_per_success=args.bonus_steps_per_success,
@@ -1753,6 +1845,7 @@ def main():
         min_goal_angle=args.min_goal_angle,
         target_max_goal_angle=args.target_max_goal_angle,
         curriculum_goal_angle=args.curriculum_goal_angle,
+        w1=args.w1,
         w_progress=args.w_progress,
         w_precision=args.w_precision,
         w_action_rate=args.w_action_rate,

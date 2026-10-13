@@ -15,13 +15,13 @@ Stage 1 (Tripod Precision Envelope, max_goal_angle = 0.80 rad / ~45.8°):
   - Stage 1E: 10,000 iters at EpsR = 5%  [Extreme sub-2.5° precision]
   - Stage 1 Final Verification Benchmark (50 episodes)
 
-Stage 2 (Large-Angle Gaiting Envelope, max_goal_angle = 1.57 rad / 90°, 20k iters each):
-  - Stage 2A: 20,000 iters at EpsR = 25%
-  - Stage 2B: 20,000 iters at EpsR = 20%
-  - Stage 2C: 20,000 iters at EpsR = 15%
-  - Stage 2D: 20,000 iters at EpsR = 10%
-  - Stage 2E: 20,000 iters at EpsR = 5%
-  - Stage 2 Final Verification Benchmark (50 episodes)
+Stage 2 (Large-Angle Gaiting Envelope, max_goal_angle = 1.57 rad / 90°):
+  - Stage 2A: 14,080 iters at EpsR = 25% [COMPLETED, Golden Iter 9956: EMI 0.535]
+  - Stage 2B: 3,103 iters at EpsR = 20%  [COMPLETED & PROMOTED, Golden Iter 392: EMI 0.485]
+  - Stage 2C: 3,000 iters at EpsR = 15%  [QUEUED FOR EVENING, Fast Adaptation]
+  - Stage 2D: 3,000 iters at EpsR = 10%  [QUEUED FOR OVERNIGHT, Fine Alignment]
+  - Stage 2E: 3,000 iters at EpsR = 5%   [QUEUED FOR OVERNIGHT, Sub-2.5° Extreme Precision]
+  - Stage 2 Grand Final Verification Benchmark (50 episodes at 5% tolerance)
 
 Features:
   - Prints full telemetry matrix after every 500 iterations.
@@ -155,19 +155,26 @@ def run_training_stage(
     stage_name: str,
     output_dir: str,
     checkpoint_in: str,
-    iterations: int = 10000,
+    iterations: int = 25000,
     epsilon_ratio: float = 0.25,
-    max_goal_angle: float = 0.80,
-    w_progress: float = 4.0,
-    w_precision: float = 2.0,
-    w4: float = 15.0,
+    max_goal_angle: float = 1.57,
+    warmup_iters: int = 0,
+    warmup_max_goal_angle: float = None,
+    warmup_epsilon_ratio: float = None,
+    w1: float = 1.5,
+    w_progress: float = 8.0,
+    w_precision: float = 4.0,
+    w4: float = 40.0,
     w5: float = 15.0,
-    actor_lr: float = 2e-5,
-    critic_lr: float = 1e-4,
-    eval_script: str = "in_hand_manipulation/evaluate_stage1.py"
+    actor_lr: float = 1.6e-5,
+    critic_lr: float = 8e-5,
+    max_log_std: float = -2.0,
+    entropy_coef: float = 0.0003,
+    reset_log_std: bool = False,
+    eval_script: str = "in_hand_manipulation/evaluate_stage2.py"
 ) -> str:
     """Executes a training stage, prints telemetry every 500 iters, cleans up, and evaluates."""
-    log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations}\n{'='*75}")
+    log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations} (Warmup={warmup_iters})\n{'='*75}")
     os.makedirs(output_dir, exist_ok=True)
 
     start_iteration = 1
@@ -192,13 +199,37 @@ def run_training_stage(
             log(f"  [Auto-Resume Warning] Could not parse existing progress.csv: {e}")
 
     if start_iteration <= iterations:
+        # 1. Clean old stop flags
+        stop_flag_file = os.path.join(output_dir, "training_done.flag")
+        if os.path.exists(stop_flag_file):
+            try:
+                os.remove(stop_flag_file)
+            except Exception:
+                pass
+
+        # 2. Launch Continuous Background Model Evaluator Sidecar (500 random tries across Cylinder, Cube, Cuboid)
+        eval_worker_cmd = [
+            "python3", "in_hand_manipulation/background_eval_worker.py",
+            "--watch_dir", output_dir,
+            "--num_episodes", "500",
+            "--num_workers", "4",
+            "--max_goal_angle", str(max_goal_angle),
+            "--epsilon_ratio", str(epsilon_ratio),
+            "--stop_flag", stop_flag_file,
+            "--best_output", os.path.join(output_dir, "ppo_best_actor.pth")
+        ]
+        log(f"  [Sidecar] Launching Continuous Background Evaluator (evaluates every 100 iters on 500 random tries)...")
+        eval_proc = subprocess.Popen(eval_worker_cmd)
+
+        # 3. Launch Training Process (12 workers for training + 4 workers for eval = 16 cores fully balanced)
         cmd = [
             "python3", "in_hand_manipulation/train_ppo.py",
             "--iterations", str(iterations),
             "--start_iteration", str(start_iteration),
-            "--num_envs", "16",
+            "--num_envs", "12",
             "--checkpoint", checkpoint_in,
-            "--warmup_iters", "0",
+            "--warmup_iters", str(warmup_iters),
+            "--w1", str(w1),
             "--w_progress", str(w_progress),
             "--w_precision", str(w_precision),
             "--w4", str(w4),
@@ -207,15 +238,23 @@ def run_training_stage(
             "--max_goal_angle", str(max_goal_angle),
             "--actor_lr", str(actor_lr),
             "--critic_lr", str(critic_lr),
-            "--save_freq", "500",
+            "--max_log_std", str(max_log_std),
+            "--entropy_coef", str(entropy_coef),
+            "--save_freq", "100",
             "--output_dir", output_dir
         ]
+        if warmup_max_goal_angle is not None:
+            cmd.extend(["--warmup_max_goal_angle", str(warmup_max_goal_angle)])
+        if warmup_epsilon_ratio is not None:
+            cmd.extend(["--warmup_epsilon_ratio", str(warmup_epsilon_ratio)])
+        if reset_log_std and start_iteration == 1:
+            cmd.append("--reset_log_std")
         
-        log(f"Launching command: {' '.join(cmd)}")
-        proc = subprocess.Popen(cmd)
+        log(f"Launching training command: {' '.join(cmd)}")
+        train_proc = subprocess.Popen(cmd)
         
         last_iter_report = (start_iteration // 500) * 500
-        while proc.poll() is None:
+        while train_proc.poll() is None:
             if os.path.exists(prog_path):
                 try:
                     with open(prog_path, "r") as f:
@@ -237,31 +276,39 @@ def run_training_stage(
                     pass
             time.sleep(30)
             
-        log(f"{stage_name} Training Completed!")
-        time.sleep(5)
-    
-    # Locate best checkpoint
-    best_ckpt = os.path.join(output_dir, "ppo_best_actor.pth")
-    if not os.path.exists(best_ckpt):
-        best_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
+        log(f"{stage_name} Training Completed all {iterations} iterations!")
         
-    # Run evaluation
-    log(f"Evaluating {stage_name} using {eval_script} on {best_ckpt}...")
-    eval_cmd = [
-        "python3", eval_script,
-        "--checkpoint", best_ckpt,
-        "--episodes", "25",
-        "--no_render"
-    ]
-    if "stage2" in eval_script:
-        eval_cmd.extend(["--max_goal_angle", str(max_goal_angle)])
-    code, eval_out = run_cmd(eval_cmd)
+        # 4. Signal Background Evaluator to process any remaining queued checkpoints and exit
+        log(f"  [Sidecar Sync] Creating completion flag and waiting for background evaluator to sync...")
+        with open(stop_flag_file, "w") as f:
+            f.write("done\n")
+        eval_proc.wait()
+        log(f"  [Sidecar Sync] Background evaluator synchronized and exited cleanly.")
+        if os.path.exists(stop_flag_file):
+            try:
+                os.remove(stop_flag_file)
+            except Exception:
+                pass
+        time.sleep(3)
     
-    summary_text = eval_out[-1500:] if len(eval_out) > 1500 else eval_out
-    log(f"Evaluation summary for {stage_name}:\n{summary_text}")
+    # 5. Run Final Verification Benchmark with Comprehensive Evaluator (30 episodes, 10 per object)
+    best_ckpt = os.path.join(output_dir, "ppo_best_actor.pth")
+    summary_text = ""
+    if os.path.exists(best_ckpt):
+        log(f"Running Final Stage Comprehensive Benchmark using evaluate_comprehensive.py...")
+        eval_cmd = [
+            "python3", "in_hand_manipulation/evaluate_comprehensive.py",
+            "--checkpoint", best_ckpt,
+            "--episodes_per_object", "10",
+            "--max_goal_angle", str(max_goal_angle)
+        ]
+        _, eval_summary = run_cmd(eval_cmd)
+        summary_text = eval_summary[-2000:] if len(eval_summary) > 2000 else eval_summary
+        log(f"Stage Comprehensive Benchmark Result:\n{summary_text}")
+
     append_report(stage_name, summary_text)
     
-    # Save dedicated backup copy
+    # Save dedicated golden backup copy
     backup_file = os.path.join(output_dir, f"{stage_name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('%', 'pct')}_golden.pth")
     if os.path.exists(best_ckpt):
         shutil.copy2(best_ckpt, backup_file)
@@ -270,7 +317,7 @@ def run_training_stage(
     # Clean workspace intermediate checkpoints
     cleanup_stage_dir(output_dir)
     
-    git_commit_and_push(f"chore(curriculum): completed {stage_name} with evaluation report")
+    git_commit_and_push(f"chore(curriculum): completed {stage_name} with comprehensive 500-try evaluation")
     return best_ckpt
 
 
@@ -282,222 +329,159 @@ def main():
             f.write("# Overnight Master Curriculum Execution Report\n\n")
 
     # =========================================================================
-    # PART 1: STAGE 1 (PRECISION ENVELOPE theta <= 45.8° / 0.80 rad)
+    # PART 1: STAGE 1 VERIFICATION
     # =========================================================================
-    
-    # Consolidated Stage 1 Best Model
     stage1_consolidated = os.path.join(PROJECT_ROOT, "stage1", "stage1_best_model.pth")
-    if os.path.exists(stage1_consolidated):
-        log("Stage 1 verified and consolidated in stage1/stage1_best_model.pth. Proceeding directly to Stage 2...")
-        current_model = stage1_consolidated
-    else:
-        # Check if Stage 1D (Part 1) is currently running
-        s1d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10")
-        if is_train_process_running() and os.path.exists(s1d_dir):
-            log("Stage 1D (Part 1, 10% error) is currently executing. Waiting for 10,000 iterations to finish...")
-            wait_for_active_training(s1d_dir)
-            
-            # Evaluate Stage 1D (Part 1)
-            best_s1d = os.path.join(s1d_dir, "ppo_best_actor.pth")
-            if not os.path.exists(best_s1d):
-                best_s1d = os.path.join(s1d_dir, "ppo_latest_actor.pth")
-            log("Evaluating Stage 1D (Part 1)...")
-            code, eval_out = run_cmd([
-                "python3", "in_hand_manipulation/evaluate_stage1.py",
-                "--checkpoint", best_s1d,
-                "--episodes", "25",
-                "--no_render"
-            ])
-            append_report("Stage 1D Part 1 (EpsR = 10%)", eval_out[-1500:])
-            shutil.copy2(best_s1d, os.path.join(s1d_dir, "stage_1d_part1_golden.pth"))
-            cleanup_stage_dir(s1d_dir)
-            git_commit_and_push("chore(curriculum): Stage 1D Part 1 completed")
-            current_model = best_s1d
-        else:
-            current_model = os.path.join(s1d_dir, "ppo_best_actor.pth")
-            if not os.path.exists(current_model):
-                current_model = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps15", "ppo_best_actor.pth")
-
-        # Step 1D (Part 2): Another 10k iterations on 10% error
-        s1d2_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps10_part2")
-        if not is_stage_fully_completed(s1d2_dir, 10000):
-            current_model = run_training_stage(
-                stage_name="Stage 1D (Part 2 - 10k Consolidation)",
-                output_dir=s1d2_dir,
-                checkpoint_in=current_model,
-                iterations=10000,
-                epsilon_ratio=0.10,
-                max_goal_angle=0.80,
-                w_progress=4.0,
-                w_precision=3.0,
-                w4=20.0,
-                w5=15.0,
-                actor_lr=1.5e-5,
-                critic_lr=8e-5,
-                eval_script="in_hand_manipulation/evaluate_stage1.py"
-            )
-        else:
-            log("Stage 1D (Part 2) already completed. Resuming...")
-            current_model = os.path.join(s1d2_dir, "ppo_best_actor.pth")
-
-        # Step 1E: Another 10k iterations on 5% error for Stage 1 itself
-        s1e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage1_eps05")
-        if not is_stage_fully_completed(s1e_dir, 10000):
-            current_model = run_training_stage(
-                stage_name="Stage 1E (5% Precision Lock-In)",
-                output_dir=s1e_dir,
-                checkpoint_in=current_model,
-                iterations=10000,
-                epsilon_ratio=0.05,
-                max_goal_angle=0.80,
-                w_progress=4.0,
-                w_precision=4.0,
-                w4=25.0,
-                w5=15.0,
-                actor_lr=1.2e-5,
-                critic_lr=6e-5,
-                eval_script="in_hand_manipulation/evaluate_stage1.py"
-            )
-        else:
-            log("Stage 1E (5% error) already completed. Resuming...")
-            current_model = os.path.join(s1e_dir, "ppo_best_actor.pth")
-
-        # Comprehensive 50-episode Stage 1 Final Verification Benchmark
-        log("Running full 50-episode Stage 1 Final Precision Verification...")
-        code, stage1_final_eval = run_cmd([
-            "python3", "in_hand_manipulation/evaluate_stage1.py",
-            "--checkpoint", current_model,
-            "--episodes", "50",
-            "--no_render"
-        ])
-        append_report("Stage 1 Grand Final Benchmark (50 Episodes, Sub-2.5° Tolerance)", stage1_final_eval[-2000:])
-        git_commit_and_push("feat(curriculum): Stage 1 100% completed with verified 5% precision benchmark")
+    if not os.path.exists(stage1_consolidated):
+        raise FileNotFoundError(f"Stage 1 golden checkpoint not found at {stage1_consolidated}")
+        
+    log("Stage 1 verified and consolidated in stage1/stage1_best_model.pth. Proceeding directly to Stage 2...")
+    current_model = stage1_consolidated
 
     # =========================================================================
     # PART 2: STAGE 2 (90° ROTATION ENVELOPE max_goal_angle = 1.57 rad / 90°)
-    # Double iterations = 20,000 iterations for each step!
+    # 10,000 Iterations Per Stage with Continuous 500-Try Background Evaluator Sidecar
     # =========================================================================
-    log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING (20,000 ITERATIONS PER STEP)\n" + "#"*75)
+    log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING (10k ITERS PER STAGE)\n" + "#"*75)
 
-    # Stage 2A: 90° at EpsR = 25% (20k iterations)
-    s2a_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25")
-    if not is_stage_fully_completed(s2a_dir, 20000):
-        current_model = run_training_stage(
-            stage_name="Stage 2A (90° Envelope, 25% Error)",
-            output_dir=s2a_dir,
-            checkpoint_in=current_model,
-            iterations=20000,
-            epsilon_ratio=0.25,
-            max_goal_angle=1.57,
-            w_progress=4.0,
-            w_precision=2.0,
-            w4=18.0,
-            w5=15.0,
-            actor_lr=1.8e-5,
-            critic_lr=9e-5,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
-        )
-    else:
-        current_model = os.path.join(s2a_dir, "ppo_best_actor.pth")
+    # Stage 2A: 90° at EpsR = 25% (Completed 14,080 iters, verified best model at Iter 9956)
+    s2a_best = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25", "stage2a_golden.pth")
+    if not os.path.exists(s2a_best):
+        s2a_best = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25", "ppo_best_actor.pth")
+    log(f"Stage 2A (25% Error) completed. Using verified golden model: {s2a_best}")
+    current_model = s2a_best
 
-    # Stage 2B: 90° at EpsR = 20% (20k iterations)
+    # Stage 2B: 90° at EpsR = 20% (Resume from Iter 3104 to 10,000)
     s2b_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps20")
-    if not is_stage_fully_completed(s2b_dir, 20000):
+    if not is_stage_fully_completed(s2b_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 2B (90° Envelope, 20% Error)",
             output_dir=s2b_dir,
             checkpoint_in=current_model,
-            iterations=20000,
+            iterations=10000,
             epsilon_ratio=0.20,
             max_goal_angle=1.57,
-            w_progress=4.0,
-            w_precision=2.2,
-            w4=20.0,
+            warmup_iters=0,
+            w1=1.5,
+            w_progress=8.0,
+            w_precision=4.5,
+            w4=45.0,
             w5=15.0,
-            actor_lr=1.6e-5,
-            critic_lr=8e-5,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
+            actor_lr=1.4e-5,
+            critic_lr=7e-5,
+            max_log_std=-2.0,
+            entropy_coef=0.0003,
+            reset_log_std=False
         )
     else:
-        current_model = os.path.join(s2b_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(s2b_dir, "stage2b_golden.pth")
+        if not os.path.exists(current_model):
+            current_model = os.path.join(s2b_dir, "ppo_best_actor.pth")
 
-    # Stage 2C: 90° at EpsR = 15% (20k iterations)
+    # Stage 2C: 90° at EpsR = 15% (10,000 iterations, 150-iter Critic Warm-Up)
     s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
-    if not is_stage_fully_completed(s2c_dir, 20000):
+    if not is_stage_fully_completed(s2c_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 2C (90° Envelope, 15% Error)",
             output_dir=s2c_dir,
             checkpoint_in=current_model,
-            iterations=20000,
+            iterations=10000,
             epsilon_ratio=0.15,
             max_goal_angle=1.57,
-            w_progress=4.0,
-            w_precision=2.5,
-            w4=22.0,
+            warmup_iters=150,
+            warmup_max_goal_angle=1.57,
+            warmup_epsilon_ratio=0.15,
+            w1=1.5,
+            w_progress=8.5,
+            w_precision=5.0,
+            w4=45.0,
             w5=15.0,
             actor_lr=1.4e-5,
             critic_lr=7e-5,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
+            max_log_std=-2.0,
+            entropy_coef=0.0003,
+            reset_log_std=False
         )
     else:
-        current_model = os.path.join(s2c_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(s2c_dir, "stage2c_golden.pth")
+        if not os.path.exists(current_model):
+            current_model = os.path.join(s2c_dir, "ppo_best_actor.pth")
 
-    # Stage 2D: 90° at EpsR = 10% (20k iterations)
+    # Stage 2D: 90° at EpsR = 10% (10,000 iterations, 150-iter Critic Warm-Up)
     s2d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps10")
-    if not is_stage_fully_completed(s2d_dir, 20000):
+    if not is_stage_fully_completed(s2d_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 2D (90° Envelope, 10% Error)",
             output_dir=s2d_dir,
             checkpoint_in=current_model,
-            iterations=20000,
+            iterations=10000,
             epsilon_ratio=0.10,
             max_goal_angle=1.57,
-            w_progress=4.0,
-            w_precision=3.0,
-            w4=24.0,
+            warmup_iters=150,
+            warmup_max_goal_angle=1.57,
+            warmup_epsilon_ratio=0.10,
+            w1=1.5,
+            w_progress=9.0,
+            w_precision=6.0,
+            w4=50.0,
             w5=15.0,
             actor_lr=1.2e-5,
             critic_lr=6e-5,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
+            max_log_std=-2.0,
+            entropy_coef=0.0003,
+            reset_log_std=False
         )
     else:
-        current_model = os.path.join(s2d_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(s2d_dir, "stage2d_golden.pth")
+        if not os.path.exists(current_model):
+            current_model = os.path.join(s2d_dir, "ppo_best_actor.pth")
 
-    # Stage 2E: 90° at EpsR = 5% (20k iterations)
+    # Stage 2E: 90° at EpsR = 5% (10,000 iterations, 150-iter Critic Warm-Up, Extreme Precision)
     s2e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps05")
-    if not is_stage_fully_completed(s2e_dir, 20000):
+    if not is_stage_fully_completed(s2e_dir, 10000):
         current_model = run_training_stage(
             stage_name="Stage 2E (90° Envelope, 5% Error)",
             output_dir=s2e_dir,
             checkpoint_in=current_model,
-            iterations=20000,
+            iterations=10000,
             epsilon_ratio=0.05,
             max_goal_angle=1.57,
-            w_progress=4.0,
-            w_precision=4.0,
-            w4=26.0,
+            warmup_iters=150,
+            warmup_max_goal_angle=1.57,
+            warmup_epsilon_ratio=0.05,
+            w1=1.5,
+            w_progress=9.5,
+            w_precision=7.0,
+            w4=55.0,
             w5=15.0,
             actor_lr=1.0e-5,
             critic_lr=5e-5,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
+            max_log_std=-2.0,
+            entropy_coef=0.0003,
+            reset_log_std=False
         )
     else:
-        current_model = os.path.join(s2e_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(s2e_dir, "stage2e_golden.pth")
+        if not os.path.exists(current_model):
+            current_model = os.path.join(s2e_dir, "ppo_best_actor.pth")
 
-    # Comprehensive 50-episode Stage 2 Grand Final Benchmark
-    log("Running full 50-episode Stage 2 Grand Final Verification...")
+    # Comprehensive 60-episode Stage 2 Grand Final Verification Benchmark (20 per object)
+    log("Running 60-episode Stage 2 Grand Final Verification (Sub-5% Error Margin, All Objects)...")
     code, stage2_final_eval = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_stage2.py",
+        "python3", "in_hand_manipulation/evaluate_comprehensive.py",
         "--checkpoint", current_model,
         "--max_goal_angle", "1.57",
-        "--episodes", "50",
-        "--no_render"
+        "--episodes_per_object", "20"
     ])
-    append_report("Stage 2 Grand Final Benchmark (50 Episodes, 90° Gaiting)", stage2_final_eval[-2000:])
-    git_commit_and_push("feat(curriculum): Stage 2 100% completed with verified 90-deg gaiting benchmark")
+    append_report("Stage 2 Grand Final Benchmark (60 Episodes, 90° Gaiting, Sub-5% Error)", stage2_final_eval[-2000:])
+    git_commit_and_push("feat(curriculum): Stage 2 full completion through 10k iters per stage and 5% extreme precision")
 
-    log("=== MASTER CURRICULUM COMPLETED ALL STAGES (STAGE 1 + STAGE 2) SUCCESSFULLY! ===")
+    log("=== STAGE 2 COMPLETED THROUGH 5% EXTREME PRECISION (STAGE 2E) SUCCESSFULLY! ===")
 
 
 if __name__ == "__main__":
     main()
+
+
+
+

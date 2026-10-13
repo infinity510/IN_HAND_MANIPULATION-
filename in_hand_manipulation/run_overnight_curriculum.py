@@ -135,7 +135,21 @@ def wait_for_active_training(dir_to_watch: str):
     time.sleep(5)
 
 
-def is_stage_fully_completed(stage_dir: str, target_iters: int) -> bool:
+def is_stage_fully_completed(stage_dir: str, target_iters: int, target_accuracy: float = 0.70) -> bool:
+    golden = os.path.join(stage_dir, f"{os.path.basename(stage_dir)}_golden.pth")
+    if os.path.exists(golden):
+        return True
+    eval_hist = os.path.join(stage_dir, "eval_benchmark_history.csv")
+    if os.path.exists(eval_hist):
+        try:
+            with open(eval_hist, "r") as f:
+                lines = [l.strip() for l in f.readlines() if l.strip()]
+                if len(lines) > 1:
+                    last_succ = float(lines[-1].split(",")[1])
+                    if last_succ >= target_accuracy:
+                        return True
+        except Exception:
+            pass
     prog = os.path.join(stage_dir, "progress.csv")
     if not (os.path.exists(stage_dir) and os.path.exists(prog)):
         return False
@@ -245,7 +259,10 @@ def run_training_stage(
             "--max_log_std", str(max_log_std),
             "--entropy_coef", str(entropy_coef),
             "--save_freq", "100",
-            "--output_dir", output_dir
+            "--output_dir", output_dir,
+            "--plateau_window", "2500",
+            "--target_accuracy", "0.70",
+            "--cap_iterations", str(iterations)
         ]
         if warmup_max_goal_angle is not None:
             cmd.extend(["--warmup_max_goal_angle", str(warmup_max_goal_angle)])
@@ -361,14 +378,14 @@ def main():
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
-    # Stage 2C: 90° at EpsR = 15% (25,000 iterations, 400-iter Critic Warm-Up for new collision & joint dynamics)
+    # Stage 2C: 90° at EpsR = 15% (Up to 70,000 iterations or until stable 70% accuracy, 400-iter Critic Warm-Up)
     s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
-    if not is_stage_fully_completed(s2c_dir, 25000):
+    if not is_stage_fully_completed(s2c_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2C (90° Envelope, 15% Error)",
             output_dir=s2c_dir,
             checkpoint_in=current_model,
-            iterations=25000,
+            iterations=70000,
             epsilon_ratio=0.15,
             max_goal_angle=1.57,
             warmup_iters=400,
@@ -389,14 +406,14 @@ def main():
     else:
         current_model = os.path.join(s2c_dir, "ppo_best_actor.pth")
 
-    # Stage 2D: 90° at EpsR = 10% (25,000 iterations, 150-iter Critic Warm-Up)
+    # Stage 2D: 90° at EpsR = 10% (Up to 70,000 iterations or until stable 70% accuracy, 150-iter Critic Warm-Up)
     s2d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps10")
-    if not is_stage_fully_completed(s2d_dir, 25000):
+    if not is_stage_fully_completed(s2d_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2D (90° Envelope, 10% Error)",
             output_dir=s2d_dir,
             checkpoint_in=current_model,
-            iterations=25000,
+            iterations=70000,
             epsilon_ratio=0.10,
             max_goal_angle=1.57,
             warmup_iters=150,
@@ -417,14 +434,14 @@ def main():
     else:
         current_model = os.path.join(s2d_dir, "ppo_best_actor.pth")
 
-    # Stage 2E: 90° at EpsR = 5% (25,000 iterations, 150-iter Critic Warm-Up, Extreme Precision)
+    # Stage 2E: 90° at EpsR = 5% (Up to 70,000 iterations or until stable 70% accuracy, 150-iter Critic Warm-Up, Extreme Precision)
     s2e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps05")
-    if not is_stage_fully_completed(s2e_dir, 25000):
+    if not is_stage_fully_completed(s2e_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2E (90° Envelope, 5% Error)",
             output_dir=s2e_dir,
             checkpoint_in=current_model,
-            iterations=25000,
+            iterations=70000,
             epsilon_ratio=0.05,
             max_goal_angle=1.57,
             warmup_iters=150,

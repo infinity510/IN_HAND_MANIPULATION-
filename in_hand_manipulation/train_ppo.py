@@ -155,6 +155,11 @@ class PPOConfig:
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
     dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
+    plateau_window: int = 2500      # Window of iterations without improvement to trigger plateau breaker
+    plateau_breaker: bool = True    # If True, escalates difficulty upon 2500-iter plateau
+    target_accuracy: float = 0.70   # Target benchmark success rate (70%)
+    cap_iterations: int = 70000     # Maximum iteration ceiling per stage (70k cap)
+
 
 
 
@@ -255,12 +260,20 @@ class DeltoInHandManipulationEnv:
         self.current_epsilon = self.reward_weights.epsilon
         self.prev_action = np.zeros(len(self.actuator_ids), dtype=np.float32)
         
+        # Adaptive Object Performance Tracking [successes, attempts] for hard-negative sampling
+        self.object_performance = {1: [3, 10], 2: [4, 10], 3: [6, 10]}
+        self.min_goal_angle = 0.60
+        
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
         self.palm_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
 
     def set_max_goal_angle(self, max_angle: float):
         """Updates maximum goal rotation angle for curriculum training."""
         self.max_goal_angle = float(max_angle)
+
+    def set_min_goal_angle(self, min_angle: float):
+        """Updates minimum goal rotation angle floor for curriculum training."""
+        self.min_goal_angle = float(min_angle)
 
     def set_epsilon(self, epsilon: float):
         """Updates goal orientation tolerance epsilon in radians."""
@@ -274,7 +287,8 @@ class DeltoInHandManipulationEnv:
         """
         Samples a new 3D target quaternion [w, x, y, z] in SO(3).
         If max_goal_angle >= pi, samples uniformly across full SO(3).
-        Otherwise, samples a random rotation axis on S^2 and rotation angle in [min_angle, max_goal_angle].
+        Otherwise, samples a random rotation axis on S^2 and rotation angle in [min_angle, max_goal_angle]
+        with a mild skew (u^0.8) toward challenging steep angles without neglecting lower angles.
         """
         if self.max_goal_angle >= (np.pi - 1e-4):
             rand_rot = transform.Rotation.random()
@@ -283,11 +297,14 @@ class DeltoInHandManipulationEnv:
         
         axis = np.random.randn(3)
         axis = axis / (np.linalg.norm(axis) + 1e-8)
-        min_angle = min(0.15, self.max_goal_angle * 0.3)
-        angle = float(np.random.uniform(min_angle, self.max_goal_angle))
+        min_angle = getattr(self, "min_goal_angle", min(0.15, self.max_goal_angle * 0.3))
+        # Mild power skew (u^0.8) gently raises frequency of larger rotations:
+        u = float(np.random.uniform(0.0, 1.0) ** 0.8)
+        angle = float(min_angle + (self.max_goal_angle - min_angle) * u)
         rand_rot = transform.Rotation.from_rotvec(axis * angle)
         q_xyzw = rand_rot.as_quat()
         return np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
+
 
     def _get_gripper_joint_names(self) -> List[str]:
         names = []
@@ -339,9 +356,18 @@ class DeltoInHandManipulationEnv:
         # 1. Reset Gripper Joints
         self.reset_gripper_pose()
         
-        # 2. Select Active Object (Randomize across Cylinder, Cube, Cuboid if None)
+        # 2. Select Active Object (Adaptive Mild Skew towards weaker objects)
         if object_id is None:
-            self.active_object_id = int(np.random.choice([1, 2, 3]))
+            fails = np.array([
+                1.0 - (self.object_performance[k][0] / max(1, self.object_performance[k][1]))
+                for k in [1, 2, 3]
+            ], dtype=np.float32)
+            w = np.exp(0.5 * fails)
+            p = w / w.sum()
+            # Clamp between 0.20 and 0.50 to avoid starvation while giving weaker objects extra focus
+            p = np.clip(p, 0.20, 0.50)
+            p = p / p.sum()
+            self.active_object_id = int(np.random.choice([1, 2, 3], p=p))
         else:
             self.active_object_id = int(object_id)
             
@@ -625,6 +651,18 @@ class DeltoInHandManipulationEnv:
         terminated = is_dropped
         truncated = (self.step_count >= self.current_max_steps)
         
+        # Track per-object success/attempt statistics for adaptive sampling
+        if terminated or truncated:
+            obj_id = self.active_object_id
+            if hasattr(self, "object_performance") and obj_id in self.object_performance:
+                self.object_performance[obj_id][1] += 1
+                if self.episode_successes > 0:
+                    self.object_performance[obj_id][0] += 1
+                if self.object_performance[obj_id][1] > 100:
+                    self.object_performance[obj_id][0] = max(1, int(self.object_performance[obj_id][0] * 0.95))
+                    self.object_performance[obj_id][1] = max(2, int(self.object_performance[obj_id][1] * 0.95))
+
+        
         # Rotational Closure for the episode:
         # If the policy achieved one or more goals during the episode, it achieved full 100% rotational closure.
         # Otherwise, closure measures proportional reduction in angular error toward the goal.
@@ -723,6 +761,10 @@ class DummyVecEnv:
         for env in self.envs:
             env.set_max_goal_angle(float(max_angle))
 
+    def set_min_goal_angle(self, min_angle: float):
+        for env in self.envs:
+            env.set_min_goal_angle(float(min_angle))
+
     def close(self):
         for env in self.envs:
             env.close()
@@ -776,6 +818,9 @@ class SubprocVecEnv:
             elif cmd == "set_max_goal_angle":
                 env.set_max_goal_angle(float(data))
                 pipe.send(True)
+            elif cmd == "set_min_goal_angle":
+                env.set_min_goal_angle(float(data))
+                pipe.send(True)
             elif cmd == "close":
                 env.close()
                 pipe.close()
@@ -819,6 +864,13 @@ class SubprocVecEnv:
             p.send(("set_max_goal_angle", float(max_angle)))
         for p in self.pipes:
             p.recv()
+
+    def set_min_goal_angle(self, min_angle: float):
+        for p in self.pipes:
+            p.send(("set_min_goal_angle", float(min_angle)))
+        for p in self.pipes:
+            p.recv()
+
 
     def close(self):
         for p in self.pipes:
@@ -1570,6 +1622,12 @@ class PPOFineTuner:
         best_ep_return = -float('inf')
         start_time = time.time()
         
+        # Automated Plateau Breaker & Exploration Boost state
+        last_plateau_check_iter = self.cfg.start_iteration
+        plateau_benchmark_score = max(0.0, best_emi_score)
+        base_entropy_coef = self.cfg.entropy_coef
+        entropy_boost_remaining = 0
+        
         try:
             for iteration in range(self.cfg.start_iteration, self.cfg.num_iterations + 1):
                 iter_start = time.time()
@@ -1604,6 +1662,13 @@ class PPOFineTuner:
                 
                 # Phase B: PPO Policy & Value Updates
                 update_metrics = self.update_policy(is_warmup=is_warmup)
+                
+                # Decay temporary entropy boost back to baseline
+                if entropy_boost_remaining > 0:
+                    entropy_boost_remaining -= 1
+                    if entropy_boost_remaining == 0:
+                        self.cfg.entropy_coef = base_entropy_coef
+
                 
                 elapsed = time.time() - iter_start
                 phase_tag = "[CRITIC WARM-UP]" if is_warmup else "[JOINT PPO]"
@@ -1708,8 +1773,62 @@ class PPOFineTuner:
                             self.vec_env.set_max_goal_angle(new_angle)
                             print(f"  [Curriculum -] Low proficiency ({recent_succ*100:.1f}%). Contracted goal angle: {np.degrees(current_angle):.1f}° -> {np.degrees(new_angle):.1f}°")
                         
+                    # Automated Plateau Detection & Escalation (Breaks local clamping basins)
+                    if not is_warmup and self.cfg.plateau_breaker and (iteration - last_plateau_check_iter >= self.cfg.plateau_window):
+                        gain = best_emi_score - plateau_benchmark_score
+                        if gain < 0.015:
+                            old_eps = self.cfg.epsilon_ratio
+                            new_eps = max(0.05, old_eps * 0.90)  # Tighten tolerance by 10%
+                            self.cfg.epsilon_ratio = new_eps
+                            self.vec_env.set_epsilon_ratio(new_eps)
+                            
+                            old_min_angle = getattr(self.cfg, 'min_goal_angle', 0.60)
+                            new_min_angle = min(0.95, old_min_angle + 0.05)
+                            self.cfg.min_goal_angle = new_min_angle
+                            self.vec_env.set_min_goal_angle(new_min_angle)
+                            
+                            self.cfg.entropy_coef = base_entropy_coef + 0.0002
+                            entropy_boost_remaining = 250
+                            
+                            print("\n" + "!"*75)
+                            print(f"[PLATEAU BREAKER TRIGGERED @ Iter {iteration}] No improvement (gain {gain:+.4f}) over {self.cfg.plateau_window} iters.")
+                            print(f"  -> Escalating difficulty: Tightened tolerance EpsR {old_eps*100:.1f}% -> {new_eps*100:.1f}%")
+                            print(f"  -> Raised min goal angle: {np.degrees(old_min_angle):.1f}° -> {np.degrees(new_min_angle):.1f}°")
+                            print(f"  -> Injected temporary exploration entropy boost (+0.0002 for 250 iters)")
+                            print("!"*75 + "\n")
+                        plateau_benchmark_score = best_emi_score
+                        last_plateau_check_iter = iteration
+
+                # Target Accuracy Gating: Check background evaluator log every 100 iters
+                if not is_warmup and iteration % 100 == 0:
+                    eval_hist_path = os.path.join(output_dir, "eval_benchmark_history.csv")
+                    if os.path.exists(eval_hist_path):
+                        try:
+                            with open(eval_hist_path, "r") as ef:
+                                elines = [el.strip() for el in ef.readlines() if el.strip()]
+                                if len(elines) > 1:
+                                    elast = elines[-1].split(",")
+                                    b_succ = float(elast[1])
+                                    b_ret = float(elast[4])
+                                    if b_succ >= self.cfg.target_accuracy and b_ret >= 0.70:
+                                        print("\n" + "*"*75)
+                                        print(f"[TARGET ACCURACY ACHIEVED @ Iter {iteration}] Background benchmark confirmed {b_succ*100:.1f}% success rate (>= {self.cfg.target_accuracy*100:.0f}%) and {b_ret*100:.1f}% retention!")
+                                        print(f"Stage objective fully mastered. Saving golden checkpoint...")
+                                        print("*"*75 + "\n")
+                                        self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
+                                        break
+                        except Exception:
+                            pass
+
+                # Cap iterations safety ceiling (e.g. 70k cap)
+                if iteration >= self.cfg.cap_iterations:
+                    print(f"\n[CEILING REACHED @ Iter {iteration}] Reached maximum stage iteration cap of {self.cfg.cap_iterations}. Finalizing stage.\n")
+                    self.save_checkpoint(os.path.join(output_dir, "ppo_latest_actor.pth"), iteration, rollout_metrics)
+                    break
+
                 if iteration % self.cfg.save_freq == 0 or iteration == self.cfg.num_iterations:
                     self.save_checkpoint(os.path.join(output_dir, f"ppo_checkpoint_iter_{iteration}.pth"), iteration, rollout_metrics)
+
         except KeyboardInterrupt:
             print("\n[PPOFineTuner] Training interrupted by user (Ctrl+C). Saving latest checkpoint...")
             if 'rollout_metrics' in locals():
@@ -1794,6 +1913,10 @@ def parse_args():
     parser.add_argument("--output_dir", type=str, default="checkpoints_ppo", help="Output directory for checkpoints")
     parser.add_argument("--start_iteration", type=int, default=1, help="Starting iteration count (useful for resuming interrupted runs)")
     parser.add_argument("--save_freq", type=int, default=100, help="Interval (iterations) to save periodic milestone checkpoints (default: 100)")
+    parser.add_argument("--plateau_window", type=int, default=2500, help="Window of iterations without gain to declare plateau (default: 2500)")
+    parser.add_argument("--target_accuracy", type=float, default=0.70, help="Target benchmark success rate to complete stage (default: 0.70 = 70%%)")
+    parser.add_argument("--cap_iterations", type=int, default=70000, help="Maximum cap on iterations per stage (default: 70000)")
+    parser.add_argument("--no_plateau_breaker", action="store_true", help="Disable automatic plateau breaker")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     return parser.parse_args()
 
@@ -1868,6 +1991,10 @@ def main():
         render=args.render,
         show_actions=args.show_actions,
         dr_ratio=args.dr_ratio,
+        plateau_window=args.plateau_window,
+        plateau_breaker=not args.no_plateau_breaker,
+        target_accuracy=args.target_accuracy,
+        cap_iterations=args.cap_iterations,
     )
     
     tuner = PPOFineTuner(

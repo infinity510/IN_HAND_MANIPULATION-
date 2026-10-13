@@ -1049,5 +1049,38 @@ To establish a rigorous empirical baseline under the updated physical simulation
 2. **Clear Evolutionary Progression**:
    - As curriculum tightens from Stage 1 $\to$ 2A $\to$ 2B $\to$ 2C, overall success under the full $90^\circ$ envelope scales from $32.3\% \to 35.3\% \to 40.0\% \to 40.3\%$, while EMI improves from $0.243 \to 0.345$.
 
+---
+
+## 31. Autonomous Plateau Breaker, Adaptive Hard-Negative Sampling, and 70k Target-Accuracy Gating
+
+### 1. The "Satisficing Stagnation" Dilemma
+During extended reinforcement learning on complex multi-object manipulation tasks, policies often encounter persistent plateaus spanning 2,000–3,000 iterations:
+- **Root Cause**: The hand discovers a comfortable tripod pinching strategy that secures steady contact rewards ($+0.15/\text{step}$) and avoids drop penalties ($-25.0$).
+- Under uniform object and angle sampling ($33.3\%$ each), the policy spends two-thirds of its rollout steps on objects it already retains easily (Cube and Cuboid), generating negligible advantage variance on failure modes.
+- Attempting deeper reorientation on rolling geometries (e.g., Cylinder) carries drop risk, causing policy gradients to stagnate in a risk-averse reward basin.
+
+### 2. The Three-Part Solution Architecture
+
+#### A. Adaptive Mild Hard-Negative Sampling (`AdaptiveObjectSampler`)
+- Rolling performance statistics $[\text{successes}, \text{attempts}]$ are tracked per object within `DeltoInHandManipulationEnv`.
+- Object sampling probabilities are softly tilted toward underperforming geometries via a temperature-controlled softmax:
+  $$\text{fail}_i = 1.0 - \frac{\text{succ}_i}{\text{att}_i}, \quad w_i = \exp\left(0.5 \times \text{fail}_i\right), \quad p_i = \frac{w_i}{\sum_k w_k}$$
+- Probabilities are bounded strictly to $p_i \in [0.20, 0.50]$:
+  - **Guarantee**: Gives weaker objects (Cylinder) $+35\%$ extra practice without starving the others or triggering catastrophic forgetting.
+- Goal angles are sampled with a mild power skew $u \sim U(0, 1)^{0.8}$, shifting the mean target rotation upward into challenging territory without excluding small angles.
+
+#### B. Automated Plateau Detection & Escalation (Basin Breaker)
+- Monitors policy performance over a rolling window of $2,500$ iterations.
+- If score improvement is $< 0.015$ over 2,500 iterations:
+  1. **Tightens Relative Tolerance**: $\epsilon_{\text{ratio}} \leftarrow \max(0.05, \epsilon_{\text{ratio}} \times 0.90)$ (e.g. $15\% \to 13.5\%$), stripping the static clamp of its success bonus.
+  2. **Raises Minimum Angle Floor**: $\theta_{\min} \leftarrow \min(0.95, \theta_{\min} + 0.05\text{ rad})$, eliminating trivial goals.
+  3. **Temporary Entropy Kick**: Injects a $+0.0002$ exploration entropy boost for 250 iterations to break out of the deterministic basin.
+
+#### C. Target-Accuracy Gating with 70,000 Iteration Cap
+- Replaced arbitrary static iteration thresholds with a performance-gated stopping condition:
+  - The stage continuously trains until the 500-episode background benchmark logs **$\ge 70.0\%$ success rate and $\ge 70.0\%$ retention rate** across all 3 objects.
+  - Hard safety ceiling capped at **70,000 iterations per stage** (`cap_iterations = 70000`).
+
+
 
 

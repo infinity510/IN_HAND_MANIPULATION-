@@ -1538,7 +1538,7 @@ class PPOFineTuner:
         print("="*75 + "\n")
         
         obs = self.vec_env.reset()
-        best_ckpt_path = os.path.join(output_dir, "ppo_best_actor.pth")
+        best_ckpt_path = os.path.join(output_dir, "ppo_training_best_actor.pth")
         if os.path.exists(best_ckpt_path):
             try:
                 b_ckpt = torch.load(best_ckpt_path, map_location="cpu", weights_only=False)
@@ -1645,9 +1645,9 @@ class PPOFineTuner:
                         best_success_rate = rollout_metrics["success_rate"]
                         best_mean_error = rollout_metrics["mean_error_deg"]
                         best_closure = rollout_metrics["rotational_closure"]
-                        self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
+                        self.save_checkpoint(os.path.join(output_dir, "ppo_training_best_actor.pth"), iteration, rollout_metrics)
                         print(
-                            f"  --> [NEW BEST MODEL SAVED] EMI: {emi:.4f} | "
+                            f"  --> [NEW IN-TRAINING BEST MODEL] EMI: {emi:.4f} | "
                             f"Closure: {rollout_metrics['rotational_closure']*100:.1f}% | "
                             f"Succ: {rollout_metrics['success_rate']*100:.1f}% | "
                             f"Drop: {rollout_metrics['drop_rate']*100:.1f}% | "
@@ -1655,7 +1655,7 @@ class PPOFineTuner:
                         )
                     elif best_emi_score < 0 and rollout_metrics["ep_return"] > best_ep_return:
                         best_ep_return = rollout_metrics["ep_return"]
-                        self.save_checkpoint(os.path.join(output_dir, "ppo_best_actor.pth"), iteration, rollout_metrics)
+                        self.save_checkpoint(os.path.join(output_dir, "ppo_training_best_actor.pth"), iteration, rollout_metrics)
                     
                     # Checkpoint latest model every 5 iterations or at final iteration
                     if iteration % 5 == 0 or iteration == self.cfg.num_iterations:

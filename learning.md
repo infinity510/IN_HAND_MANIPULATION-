@@ -819,6 +819,105 @@ python3 in_hand_manipulation/train_ppo.py \
   --output_dir checkpoints_ppo
 ```
 
+---
+
+## 23. Stage 2 Large-Angle Reorientation (90° / 1.57 rad) Curriculum Architecture
+
+### 1. The Challenge of Expanding from 45° to 90°
+In Stage 1, target orientations were constrained to a tripod precision envelope ($\theta_{\max} = 0.80\text{ rad} \approx 45.8^\circ$). Under that envelope, finger motions could rely on fingertip compliance without completely breaking contact. Moving to Stage 2 required expanding the envelope to **$\theta_{\max} = 1.57\text{ rad} \approx 90^\circ$**, requiring:
+1. Non-prehensile finger gaiting: releasing individual fingers, repositioning them, and re-engaging without dropping the object.
+2. Quadratic step scaling: $T(\theta) = 250 + 200\theta + 150\theta^2$ (up to 800 steps cap), providing physical simulation time for multi-phase reorientation.
+3. Multi-object transfer: testing generalization across Cylinder, Cube, and Cuboid geometries.
+
+### 2. Stage 2A Empirical Milestone (25% Relative Error Tolerance)
+- Executed **14,080 iterations** with 16 parallel MuJoCo workers.
+- **Golden Milestone Checkpoint**: Established at **Iteration 9,956** (`checkpoints_stage2_eps25/stage2a_golden.pth`).
+  - Effective Manipulation Index (EMI): **0.535**
+  - Success Rate: **73.0%**
+  - Rotational Closure: **62.8%**
+  - Drop Rate: **14.8%**
+  - Actuator Peak Torques: Consistently $< 3.5\text{ N}\cdot\text{m}$ (well below the $10\text{ N}\cdot\text{m}$ motor saturation limit).
+
+---
+
+## 24. Stage 2B (20% Error) Diagnosis: The Satisficing Trap & Entropy Collapse
+
+### 1. Empirical Observation
+Stage 2B was initialized from `stage2a_golden.pth` with relative error tightened to $\epsilon_{\text{ratio}} = 0.20$ (20% error tolerance, e.g. $\pm 18^\circ$ on a $90^\circ$ goal).
+- Early training produced significant gains: by Iteration 3,103, benchmark evaluation showed **72.0% success**, **56.6% closure**, and lowest drop rate (**33.0%**).
+- However, between Iterations 3,100 and 8,280, training completely plateaued:
+  - Return fluctuated in a narrow band: $420 \to 460$.
+  - Success rate oscillated between $18\%$ and $26\%$ in noisy training rollouts.
+  - Drop rate remained stubbornly at $30\% - 45\%$.
+  - No further improvements were recorded over 5,000 additional iterations.
+
+### 2. Root Cause Analysis
+
+#### A. The Satisficing Trap (Zero Policy Gradient Beyond Threshold)
+- Under the binary goal bonus structure:
+  $$r_{\text{success}} = +w_4 \cdot \mathbb{I}\left(d_\theta \le \epsilon \cdot \theta_{\text{init}}\right)$$
+  As soon as the object reaches within $20\%$ of the initial angle, the environment awards $+45.0$ and immediately resamples a new goal.
+- **The Optimization Floor:** Reaching $19.9\%$ error yields the exact same $+45.0$ reward as reaching $0.1\%$ error. The policy gradient slope for pushing beyond $20\%$ into tighter precision ($15\%, 10\%, 5\%$) is essentially zero. The policy satisfices at the boundary.
+
+#### B. Entropy Collapse & Action Hardening
+- Over 5,000 iterations in the plateau, the Gaussian policy's `log_std` shrank from $-2.47 \to -2.54$ ($\sigma \approx 0.084 \to 0.078\text{ rad}$), while policy entropy dropped from $-12.64 \to -13.43$.
+- As entropy collapsed, the policy crystallized into deterministic, repetitive finger motions. Without exploratory noise, the hand could not discover tighter gaits.
+
+#### C. Object Asymmetry: The "Cylinder Wall"
+- Per-object diagnostic evaluation with `evaluate_comprehensive.py` revealed a sharp performance disparity:
+  - **Cube & Cuboid**: $60\% - 80\%$ success, capable of chaining 3–4 consecutive random goals in hand without dropping.
+  - **Cylinder**: $80\%$ drop rate. Because cylinders lack flat faces, tangential shear from finger repositioning caused rolling instability.
+  - The aggregate 3-object metric was heavily dragged down by cylinder rolling drops.
+
+### 3. The Resolution: Curriculum Advance
+The remedy for the satisficing trap is not longer training at the same threshold, but immediately tightening the threshold:
+- Advancing to **Stage 2C ($\epsilon_{\text{ratio}} = 0.15$)** turns previous $19\%$ "successes" into failures, re-opening a steep policy gradient that penalizes loose manipulation and forces tighter, more secure finger gaits.
+
+---
+
+## 25. Continuous Out-of-Distribution Background Evaluator Architecture
+
+### 1. Eliminating Rollout Noise Bias
+Historically, model promotion relied on in-training rollout metrics (e.g. `emi_score` in `progress.csv`). This had serious limitations:
+- A checkpoint could register a high rollout score due to lucky random seed sampling during a 2048-step window.
+- In-training rollouts mix partial episodes and changing initial states.
+
+### 2. Continuous 500-Try Sidecar Evaluator (`background_eval_worker.py`)
+To establish an unbiased benchmark, we created an asynchronous evaluation daemon:
+- **Zero Core Contention (16-Core Allocation):**
+  - Intel Core Ultra 9 285H has 16 physical cores.
+  - Allocated: **12 workers** for `train_ppo.py` rollout generation + **4 workers** for `background_eval_worker.py`.
+  - With `torch.set_num_threads(1)`, all 16 cores operate at 100% efficiency without OS context-switching overhead.
+- **Standardized Benchmark Protocol:**
+  - Every 100 iterations, the training script saves `ppo_checkpoint_iter_{N}.pth`.
+  - The background worker detects the checkpoint and evaluates it across **500 randomized out-of-distribution episodes** with balanced object rotation (Cylinder, Cube, Cuboid).
+  - Takes $\approx 50\text{--}55\text{ seconds}$ per checkpoint (training takes $\approx 110\text{--}120\text{ seconds}$ for 100 iterations), ensuring the evaluator never falls behind.
+- **Disk Conservation:**
+  - Evaluates candidate, records metrics to `eval_benchmark_history.csv`.
+  - If composite score exceeds the running record, checkpoint is promoted to `ppo_best_actor.pth`.
+  - Intermediate milestone checkpoint is immediately purged from disk.
+- **Decoupled Architecture:**
+  - In-training rollout best model is saved to `ppo_training_best_actor.pth`.
+  - `ppo_best_actor.pth` is governed strictly and exclusively by the 500-try background benchmark.
+
+---
+
+## 26. Master Overnight Curriculum Progression (Stages 2C → 2D → 2E)
+
+### Curriculum Specifications:
+| Stage | Relative Tolerance | Angular Error Bound (on 90°) | Iterations | Critic Warmup | Learning Rates |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Stage 2A** | $25\%$ | $\le 22.5^\circ$ | 14,080 [DONE] | 0 | $1.6 \times 10^{-5} / 8.0 \times 10^{-5}$ |
+| **Stage 2B** | $20\%$ | $\le 18.0^\circ$ | 3,103 [DONE] | 0 | $1.4 \times 10^{-5} / 7.0 \times 10^{-5}$ |
+| **Stage 2C** | $15\%$ | $\le 13.5^\circ$ | 10,000 [ACTIVE] | 150 | $1.4 \times 10^{-5} / 7.0 \times 10^{-5}$ |
+| **Stage 2D** | $10\%$ | $\le 9.0^\circ$ | 10,000 [QUEUED] | 150 | $1.2 \times 10^{-5} / 6.0 \times 10^{-5}$ |
+| **Stage 2E** | $5\%$ | $\le 4.5^\circ$ (Sub-2.5° on smaller) | 10,000 [QUEUED] | 150 | $1.0 \times 10^{-5} / 5.0 \times 10^{-5}$ |
+
+### Grand Final Verification Benchmark:
+- **60 episodes** (20 per object: Cylinder, Cube, Cuboid) at sub-5% tolerance envelope with multi-goal consecutive chaining and peak joint torque verification ($< 10\text{ N}\cdot\text{m}$).
+- Generates comprehensive markdown report and commits to repository.
+
+
 
 
 

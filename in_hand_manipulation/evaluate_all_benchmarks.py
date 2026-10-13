@@ -214,9 +214,9 @@ def main():
     
     models = {
         "Stage 1 Golden (Precision Baseline)": os.path.join(PROJECT_ROOT, "stage1", "stage1_best_model.pth"),
-        "Stage 2A Golden (25% Relative Tolerance)": os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25", "stage2a_golden.pth"),
-        "Stage 2B Golden (20% Relative Tolerance)": os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps20", "stage2b_golden.pth"),
-        "Stage 2C Active Best (15% Tolerance Pipeline)": os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15", "ppo_best_actor.pth"),
+        "Stage 2A Golden (25% Relative Tolerance)": os.path.join(PROJECT_ROOT, "stage2a_eps25", "stage2a_golden.pth"),
+        "Stage 2B Golden (20% Relative Tolerance)": os.path.join(PROJECT_ROOT, "stage2b_eps20", "stage2b_golden.pth"),
+        "Stage 2 Unified Active Best (15%->10%->5% Ladder)": os.path.join(PROJECT_ROOT, "stage2_unified", "ppo_best_actor.pth"),
     }
     
     print("\n" + "="*85)

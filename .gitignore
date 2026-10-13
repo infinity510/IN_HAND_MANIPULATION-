@@ -438,6 +438,8 @@ __pycache__/
 *.onnx
 checkpoints/
 checkpoints_*/
+checkpoints*
+stage2*/
 metrics.jsonl
 *.jsonl
 progress.csv

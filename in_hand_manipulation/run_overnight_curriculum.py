@@ -374,22 +374,20 @@ def main():
     log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING\n" + "#"*75)
 
     # Stage 2A: 90° at EpsR = 25% (Completed 14,080 iters, verified best model at Iter 9956)
-    s2a_best = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25", "stage2a_golden.pth")
+    s2a_best = os.path.join(PROJECT_ROOT, "stage2a_eps25", "stage2a_golden.pth")
     if not os.path.exists(s2a_best):
-        s2a_best = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps25", "ppo_best_actor.pth")
+        s2a_best = os.path.join(PROJECT_ROOT, "stage2a_eps25", "ppo_best_actor.pth")
     log(f"Stage 2A (25% Error) completed. Using verified golden model: {s2a_best}")
 
     # Stage 2B: 90° at EpsR = 20% (Completed 3,103 iters, benchmark verified Iter 3103 model: 72% succ, 56.6% clos, 0.385 EMI)
-    s2b_golden = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps20", "stage2b_golden.pth")
-    if not os.path.exists(s2b_golden):
-        s2b_golden = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps20", "stage2b_iter3103_latest_golden.pth")
+    s2b_golden = os.path.join(PROJECT_ROOT, "stage2b_eps20", "stage2b_golden.pth")
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
     # Stage 2 Master Unified Run (15% -> 10% -> 5% Error Tolerance Ladder, 70,000 Iteration Total Cap)
     # Automatically steps down tolerance on plateau, dynamically oversamples harder objects,
     # and halts when either 70,000 total iterations are reached OR consistently 70%-80% accuracy is achieved at <= 10% error!
-    unified_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
+    unified_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
     if not is_stage_fully_completed(unified_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2 Unified Master Run (15% -> 10% -> 5% Ladder, 70k Cap)",

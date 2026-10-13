@@ -361,14 +361,14 @@ def main():
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
-    # Stage 2C: 90° at EpsR = 15% (10,000 iterations, 400-iter Critic Warm-Up for new collision & joint dynamics)
+    # Stage 2C: 90° at EpsR = 15% (25,000 iterations, 400-iter Critic Warm-Up for new collision & joint dynamics)
     s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
-    if not is_stage_fully_completed(s2c_dir, 10000):
+    if not is_stage_fully_completed(s2c_dir, 25000):
         current_model = run_training_stage(
             stage_name="Stage 2C (90° Envelope, 15% Error)",
             output_dir=s2c_dir,
             checkpoint_in=current_model,
-            iterations=10000,
+            iterations=25000,
             epsilon_ratio=0.15,
             max_goal_angle=1.57,
             warmup_iters=400,
@@ -389,14 +389,14 @@ def main():
     else:
         current_model = os.path.join(s2c_dir, "ppo_best_actor.pth")
 
-    # Stage 2D: 90° at EpsR = 10% (10,000 iterations, 150-iter Critic Warm-Up)
+    # Stage 2D: 90° at EpsR = 10% (25,000 iterations, 150-iter Critic Warm-Up)
     s2d_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps10")
-    if not is_stage_fully_completed(s2d_dir, 10000):
+    if not is_stage_fully_completed(s2d_dir, 25000):
         current_model = run_training_stage(
             stage_name="Stage 2D (90° Envelope, 10% Error)",
             output_dir=s2d_dir,
             checkpoint_in=current_model,
-            iterations=10000,
+            iterations=25000,
             epsilon_ratio=0.10,
             max_goal_angle=1.57,
             warmup_iters=150,
@@ -417,14 +417,14 @@ def main():
     else:
         current_model = os.path.join(s2d_dir, "ppo_best_actor.pth")
 
-    # Stage 2E: 90° at EpsR = 5% (10,000 iterations, 150-iter Critic Warm-Up, Extreme Precision)
+    # Stage 2E: 90° at EpsR = 5% (25,000 iterations, 150-iter Critic Warm-Up, Extreme Precision)
     s2e_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps05")
-    if not is_stage_fully_completed(s2e_dir, 10000):
+    if not is_stage_fully_completed(s2e_dir, 25000):
         current_model = run_training_stage(
             stage_name="Stage 2E (90° Envelope, 5% Error)",
             output_dir=s2e_dir,
             checkpoint_in=current_model,
-            iterations=10000,
+            iterations=25000,
             epsilon_ratio=0.05,
             max_goal_angle=1.57,
             warmup_iters=150,

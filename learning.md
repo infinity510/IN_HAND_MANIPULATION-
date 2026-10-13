@@ -958,3 +958,35 @@ During interactive visual inspection of Stage 2 policies manipulating large elon
 - Because palm collisions, restricted joint ranges, and flat-shelf penalties fundamentally shift the state-transition dynamics, the critic's value network requires thorough recalibration.
 - Granted **400 iterations** of frozen-actor critic warm-up at the start of Stage 2C, ensuring value targets are fully calibrated before the policy updates begin.
 
+---
+
+## 28. Diagnosis & Resolution of the Mesh Convex-Hull Penetration ("The Palm Trampoline Bug")
+
+### 1. Empirical Phenomenon
+When physical collision was initially enabled on `base_link`, the interactive viewer showed objects violently bouncing off into the air as soon as they touched the hand base, resulting in $100\%$ drops and extreme `CritLoss` spikes ($> 4,000$).
+
+### 2. Root Cause Analysis
+- **MuJoCo Mesh Convex-Hull Approximations:**
+  In MuJoCo, any `<geom type="mesh">` used for collision is approximated by its **3D convex hull** unless explicit convex decomposition is performed.
+- **The Hollow Cup Trap:**
+  The Delto gripper's `base_link.stl` is physically a hollow cup/cylinder. The 3 finger base mounts are located along the interior/rim at radius $r = 0.0265\text{ m}$.
+- When `base_link` had collision enabled, its convex hull spanned across the entire mouth of the cup, directly enveloping the 3 finger base links (`link_01`, `link_02`).
+- At simulation step 0, MuJoCo detected **8 deep interpenetrations** between `base_link` and the finger links with penetration distances up to **$-0.0262\text{ m}$ ($-2.6\text{ cm}$)**.
+- The constraint solver attempted to resolve these massive penetrations in a single time-step ($dt = 0.002\text{ s}$), generating thousands of Newtons of explosive repulsive force. This shook the entire kinematic tree, launching any object near the palm like a trampoline.
+
+### 3. The Geometric Resolution
+1. **Visual-Only STL Housing:**
+   Returned `base_link.stl` to visual-only rendering (`name="base_visual" contype="0" conaffinity="0"`), completely eliminating the convex-hull penetration issue.
+2. **Dedicated Geometric Support Hearth (`palm_hearth`):**
+   Introduced a pure primitive cylinder geom:
+   ```xml
+   <geom name="palm_hearth" type="cylinder" size="0.022 0.008" pos="0 0 -0.01"
+         contype="1" conaffinity="0" friction="2.5 0.05 0.005" rgba="0.25 0.25 0.25 1"
+         solimp="0.99 0.99 0.001" solref="0.002 1"/>
+   ```
+   - Located at radius $r = 0.022\text{ m} < 0.0265\text{ m}$, it sits strictly inside the clear radial opening between the 3 finger mounts.
+   - Initial penetrations at step 0 dropped from **8 down to exactly 0**.
+   - Objects touching the palm now land smoothly, settle with near-zero vertical velocity ($\approx 0.01\text{ m/s}$), and enjoy high traction (`friction="2.5"`).
+3. **Curriculum Expansion to 25,000 Iterations:**
+   Given the tighter $15\%$ error margin, newly enforced knuckle curl constraints, and flat-shelf platform dynamics, training iterations for Stage 2C, 2D, and 2E were expanded from 10,000 to **25,000 iterations per stage** to allow deep gait optimization and multi-object mastery.
+

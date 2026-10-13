@@ -361,7 +361,7 @@ def main():
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
-    # Stage 2C: 90° at EpsR = 15% (10,000 iterations, 150-iter Critic Warm-Up)
+    # Stage 2C: 90° at EpsR = 15% (10,000 iterations, 400-iter Critic Warm-Up for new collision & joint dynamics)
     s2c_dir = os.path.join(PROJECT_ROOT, "checkpoints_stage2_eps15")
     if not is_stage_fully_completed(s2c_dir, 10000):
         current_model = run_training_stage(
@@ -371,7 +371,7 @@ def main():
             iterations=10000,
             epsilon_ratio=0.15,
             max_goal_angle=1.57,
-            warmup_iters=150,
+            warmup_iters=400,
             warmup_max_goal_angle=1.57,
             warmup_epsilon_ratio=0.15,
             w1=1.5,

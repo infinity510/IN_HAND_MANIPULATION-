@@ -917,17 +917,44 @@ To establish an unbiased benchmark, we created an asynchronous evaluation daemon
 - **60 episodes** (20 per object: Cylinder, Cube, Cuboid) at sub-5% tolerance envelope with multi-goal consecutive chaining and peak joint torque verification ($< 10\text{ N}\cdot\text{m}$).
 - Generates comprehensive markdown report and commits to repository.
 
+---
 
+## 27. Mechanical Realism: Self-Collision, Knuckle Clamping, and Flat-Shelf Landing Support
 
+### 1. The "Tuck & Pivot" Simulation Cheat
+During interactive visual inspection of Stage 2 policies manipulating large elongated objects (such as the $0.055 \times 0.035 \times 0.07\text{ m}$ Cuboid), an unphysical behavior was observed:
+- When a target required a steep $70^\circ\text{--}90^\circ$ rotation, the neural network curled one finger inward so severely that the distal link and tip penetrated right through the palm casing (`base_link`), ghosting inside its own body.
+- The policy discovered this shortcut because:
+  1. Collision filtering between fingers and the palm was disabled (`contype="1", conaffinity="0"` on both, yielding `1 & 0 = 0`).
+  2. Distal knuckle joint ranges allowed up to $130^\circ$ on `m3` and $110^\circ$ on `m4` ($240^\circ$ combined curl).
+  3. Instead of maintaining an open supportive platform beneath the cuboid, the hand folded the finger through the palm to clear space, pivoting the object on the folded knuckle. On physical hardware, this would jam the motors and cause immediate mechanical failure.
 
+### 2. The Three-Pillar Mechanical Stabilization Solution
 
+#### Pillar 1: Physical Palm Collision (`contype="3", conaffinity="1"`)
+- Configured a 2-bit collision layer scheme in `scene_cube.xml`:
+  - **Palm (`base_link`)**: `contype="3"`, `conaffinity="1"`, high friction (`friction="2.5 0.05 0.005"`).
+  - **Finger Links (`link_01`–`link_04`, tip sphere)**: `contype="1"`, `conaffinity="2"`.
+  - **Objects**: `contype="0"`, `conaffinity="1"`.
+- **Mathematical Guarantees:**
+  - Finger $\to$ Object: $1\ \&\ 1 = 1 \implies$ Contact active.
+  - Finger $\to$ Palm: $1\ \&\ 1 = 1$ and $2\ \&\ 3 = 2 \implies$ **Palm physically blocks fingers! Ghosting is impossible.**
+  - Object $\to$ Palm: $1\ \&\ 3 = 1 \implies$ **Object can stably rest on the palm as a frictional support hearth.**
+  - Finger $\to$ Finger: $1\ \&\ 2 = 0 \implies$ No spurious internal self-collision force spikes between adjacent links.
 
+#### Pillar 2: Anatomical Knuckle Curl Limits
+- Clamped distal flexion limits in `scene_cube.xml`:
+  - `gripper_f*m3_joint`: Range clamped from `[-0.0873, 2.2689]` ($130^\circ$) to **`[-0.0873, 1.3963]` ($80^\circ$)**.
+  - `gripper_f*m4_joint`: Range clamped from `[-0.0873, 1.9199]` ($110^\circ$) to **`[-0.0873, 1.3090]` ($75^\circ$)**.
+- Total distal flexion is kinematically bounded to $\le 155^\circ$. The finger is physically incapable of reaching or folding backwards into the palm.
 
+#### Pillar 3: Flat-Shelf Support Regularization Penalty
+- Implemented a quadratic penalty in `train_ppo.py` that penalizes excessive distal curling during in-hand manipulation:
+  $$\text{curl}_i = q_{m3, i} + q_{m4, i}$$
+  $$\text{penalty}_{\text{flat}} = 1.5 \sum_{i=1}^3 \max(0, \text{curl}_i - 1.80\text{ rad})^2$$
+- This soft guidance directs the policy gradient toward maintaining flatter, supportive finger platforms beneath large objects, allowing them to land and roll smoothly across finger surfaces without dropping.
 
-
-
-
-
-
-
+### 3. Extended 400-Iteration Critic Warm-Up
+- Because palm collisions, restricted joint ranges, and flat-shelf penalties fundamentally shift the state-transition dynamics, the critic's value network requires thorough recalibration.
+- Granted **400 iterations** of frozen-actor critic warm-up at the start of Stage 2C, ensuring value targets are fully calibrated before the policy updates begin.
 

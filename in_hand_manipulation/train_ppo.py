@@ -555,6 +555,18 @@ class DeltoInHandManipulationEnv:
         over_cmd = np.maximum(0.0, self.safe_jnt_min - action) + np.maximum(0.0, action - self.safe_jnt_max)
         joint_limit_penalty = 0.25 * float(np.sum(np.square(limit_prox / 0.08))) + 0.04 * float(np.sum(np.square(over_cmd)))
         
+        # (b4) Flat-Shelf Support Regularization:
+        # Encourages fingers to maintain open, flat support surfaces beneath the object
+        # and penalizes excessive curling/tucking of distal knuckles into the palm.
+        # Joint layout: [f1m1, f1m2, f1m3, f1m4, f2m1, f2m2, f2m3, f2m4, f3m1, f3m2, f3m3, f3m4]
+        # Distal curls: (m3 + m4) for F1 (indices 2,3), F2 (indices 6,7), F3 (indices 10,11)
+        f1_distal_curl = post_qpos[2] + post_qpos[3]
+        f2_distal_curl = post_qpos[6] + post_qpos[7]
+        f3_distal_curl = post_qpos[10] + post_qpos[11]
+        distal_flexions = np.array([f1_distal_curl, f2_distal_curl, f3_distal_curl], dtype=np.float32)
+        hyperflex_excess = np.maximum(0.0, distal_flexions - 1.80)  # threshold: ~103° total curl
+        flat_shelf_penalty = 1.5 * float(np.sum(np.square(hyperflex_excess)))
+        
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
         
@@ -599,6 +611,7 @@ class DeltoInHandManipulationEnv:
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
+            - flat_shelf_penalty
             - (w.w3 * vel_norm_sq)
             + term_success_bonus
             - drop_penalty

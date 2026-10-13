@@ -262,7 +262,7 @@ class DeltoInHandManipulationEnv:
         
         # Adaptive Object Performance Tracking [successes, attempts] for hard-negative sampling
         self.object_performance = {1: [3, 10], 2: [4, 10], 3: [6, 10]}
-        self.min_goal_angle = 0.60
+        self.min_goal_angle = 0.15
         
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
         self.palm_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -288,7 +288,7 @@ class DeltoInHandManipulationEnv:
         Samples a new 3D target quaternion [w, x, y, z] in SO(3).
         If max_goal_angle >= pi, samples uniformly across full SO(3).
         Otherwise, samples a random rotation axis on S^2 and rotation angle in [min_angle, max_goal_angle]
-        with a mild skew (u^0.8) toward challenging steep angles without neglecting lower angles.
+        with uniform distribution across the spectrum, ensuring achievable rotations maintain positive momentum.
         """
         if self.max_goal_angle >= (np.pi - 1e-4):
             rand_rot = transform.Rotation.random()
@@ -297,9 +297,11 @@ class DeltoInHandManipulationEnv:
         
         axis = np.random.randn(3)
         axis = axis / (np.linalg.norm(axis) + 1e-8)
-        min_angle = getattr(self, "min_goal_angle", min(0.15, self.max_goal_angle * 0.3))
-        # Mild power skew (u^0.8) gently raises frequency of larger rotations:
-        u = float(np.random.uniform(0.0, 1.0) ** 0.8)
+        min_angle = getattr(self, "min_goal_angle", 0.15)
+        # Uniform sampling across [min_angle, max_goal_angle] ensures the policy experiences
+        # frequent achievable rotations (supplying +45.0 success bonuses and active gaiting momentum)
+        # while continuously challenging the policy with large 90° gaiting envelopes!
+        u = float(np.random.uniform(0.0, 1.0))
         angle = float(min_angle + (self.max_goal_angle - min_angle) * u)
         rand_rot = transform.Rotation.from_rotvec(axis * angle)
         q_xyzw = rand_rot.as_quat()
@@ -356,16 +358,17 @@ class DeltoInHandManipulationEnv:
         # 1. Reset Gripper Joints
         self.reset_gripper_pose()
         
-        # 2. Select Active Object (Adaptive Mild Skew towards weaker objects)
+        # 2. Select Active Object (Gentle Balanced Sampling: each object receives 28% - 38%)
         if object_id is None:
             fails = np.array([
                 1.0 - (self.object_performance[k][0] / max(1, self.object_performance[k][1]))
                 for k in [1, 2, 3]
             ], dtype=np.float32)
-            w = np.exp(0.5 * fails)
+            w = np.exp(0.3 * fails)
             p = w / w.sum()
-            # Clamp between 0.20 and 0.50 to avoid starvation while giving weaker objects extra focus
-            p = np.clip(p, 0.20, 0.50)
+            # Gentle balance: ensure each object gets between 28% and 38% practice,
+            # giving slightly more focus to struggling objects without starving the others or drowning in slip
+            p = np.clip(p, 0.28, 0.38)
             p = p / p.sum()
             self.active_object_id = int(np.random.choice([1, 2, 3], p=p))
         else:
@@ -1791,8 +1794,8 @@ class PPOFineTuner:
                             self.cfg.epsilon_ratio = new_eps
                             self.vec_env.set_epsilon_ratio(new_eps)
                             
-                            old_min_angle = getattr(self.cfg, 'min_goal_angle', 0.60)
-                            new_min_angle = min(0.95, old_min_angle + 0.05)
+                            old_min_angle = getattr(self.cfg, 'min_goal_angle', 0.15)
+                            new_min_angle = min(0.35, old_min_angle + 0.05)
                             self.cfg.min_goal_angle = new_min_angle
                             self.vec_env.set_min_goal_angle(new_min_angle)
                             
@@ -1910,7 +1913,7 @@ def parse_args():
     parser.add_argument("--min_epsilon", type=float, default=0.28, help="Legacy minimum epsilon threshold for curriculum in radians (default: 0.28 rad ~= 16.0 deg)")
     parser.add_argument("--max_epsilon", type=float, default=0.40, help="Legacy maximum epsilon threshold for curriculum in radians (default: 0.40 rad ~= 23.0 deg)")
     parser.add_argument("--max_goal_angle", type=float, default=0.80, help="Initial maximum target orientation angle in radians (default: 0.80 rad ~= 45.8 deg)")
-    parser.add_argument("--min_goal_angle", type=float, default=0.60, help="Minimum goal rotation angle floor in radians (default: 0.60 rad ~= 34.4 deg)")
+    parser.add_argument("--min_goal_angle", type=float, default=0.15, help="Minimum goal rotation angle floor in radians (default: 0.15 rad ~= 8.6 deg)")
     parser.add_argument("--target_max_goal_angle", type=float, default=1.40, help="Target maximum goal angle in radians (default: 1.40 rad ~= 80.2 deg)")
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive bidirectional curriculum contracting epsilon ratio from 25%% down to 3%% based on closure")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive bidirectional curriculum on goal angle (expands when >20%%, contracts when <8%%)")

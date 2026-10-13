@@ -1115,6 +1115,34 @@ To align the automated stopping decision with true competence:
   2. The background 500-episode benchmark confirms:
      $$\epsilon_{\text{ratio}} \le 0.10 \quad \land \quad \text{success\_rate} \ge 70.0\% \quad \land \quad \text{pre\_goal\_retention} \ge 70.0\%$$
 
+---
+
+## 33. The 'Clamping Reflex' Pitfall and Curriculum Recalibration
+
+### 1. Empirical Phenomenon: Closure Collapse with Rising Retention
+Between Iteration 700 and Iteration 1600 of Stage 2 training:
+- **Benchmark Success Rate**: Declined monotonically from **$49.2\%$ (Iter 700 peak)** down to **$22.8\%$ (Iter 1500)**.
+- **Rotational Closure**: Collapsed from **$58.7\% \to 35.6\%$**.
+- **Object Retention**: Rose from **$65.4\% \to 79.0\%$**.
+
+### 2. Root Cause Analysis: The Risk-Averse Local Minimum
+1. **Steep Angle Lockout ($\theta_{\min} = 0.60\text{ rad} \approx 34.4^\circ$)**:
+   - Small and medium rotations ($8^\circ\text{--}30^\circ$) previously supplied frequent positive reinforcement ($+45.0$ success bonuses and positive progress rewards).
+   - Enforcing a $34.4^\circ$ floor with a power skew pushed mean target rotations to $>65^\circ$. Under tight $15\%$ tolerance, success bonuses became rare.
+2. **Cylinder Hard-Negative Oversampling ($50\%$ Frequency)**:
+   - Radial symmetry caused persistent slip during large pivots, exposing the policy to frequent drop penalties ($-15.0$).
+3. **The "Clamping Reflex"**:
+   - Faced with steep goals and continuous drop penalties, policy gradients discovered that holding tight and refusing to reorient minimized losses. The hand retained objects ($79\%$ retention) but clamped passively ($35\%$ closure).
+
+### 3. Structural Three-Point Recalibration
+1. **Full Angle Spectrum ($0.15\text{--}1.57\text{ rad}$ / $8.6^\circ\text{--}90^\circ$ Uniform)**:
+   - Restores frequent stepping-stone successes across all angles, providing positive reward momentum and encouraging continuous active finger pivoting.
+2. **Gentle Balanced Object Sampling ($28\%\text{--}38\%$ Bounded)**:
+   - Bounded softmax sampling ensures Cylinder receives slight extra focus without starving Cube ($83\%$ retention) or Cuboid ($56\%$ success) or drowning policy gradients in rolling slip.
+3. **Golden Weight Re-Seeding**:
+   - Re-seeded policy weights from the verified peak golden baseline (`stage2_unified/ppo_best_actor.pth`, $48.0\%\text{--}49.2\%$ benchmark score) to immediately resume training from an aggressive, high-closure state.
+
+
 
 
 

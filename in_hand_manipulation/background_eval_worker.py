@@ -35,7 +35,7 @@ from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 _worker_actor = None
 _worker_env = None
 _worker_max_goal_angle = 1.57
-_worker_min_goal_angle = 0.60
+_worker_min_goal_angle = 0.15
 _worker_epsilon_ratio = 0.20
 
 
@@ -170,7 +170,7 @@ def main():
     parser.add_argument("--num_episodes", type=int, default=500, help="Number of random test episodes per checkpoint (default: 500)")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of parallel evaluation workers (default: 4)")
     parser.add_argument("--max_goal_angle", type=float, default=1.57, help="Max target rotation angle in radians")
-    parser.add_argument("--min_goal_angle", type=float, default=0.60, help="Min target rotation angle in radians")
+    parser.add_argument("--min_goal_angle", type=float, default=0.15, help="Min target rotation angle in radians")
     parser.add_argument("--epsilon_ratio", type=float, default=0.20, help="Target relative error threshold")
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")

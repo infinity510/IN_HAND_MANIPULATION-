@@ -240,6 +240,7 @@ def run_training_stage(
             "--num_episodes", "500",
             "--num_workers", "4",
             "--max_goal_angle", str(max_goal_angle),
+            "--min_goal_angle", "0.15",
             "--epsilon_ratio", str(epsilon_ratio),
             "--stop_flag", stop_flag_file,
             "--best_output", os.path.join(output_dir, "ppo_best_actor.pth")
@@ -262,6 +263,7 @@ def run_training_stage(
             "--w5", str(w5),
             "--epsilon_ratio", str(epsilon_ratio),
             "--max_goal_angle", str(max_goal_angle),
+            "--min_goal_angle", "0.15",
             "--actor_lr", str(actor_lr),
             "--critic_lr", str(critic_lr),
             "--max_log_std", str(max_log_std),

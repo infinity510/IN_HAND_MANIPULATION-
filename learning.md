@@ -1014,4 +1014,40 @@ The joint limits in `scene_cube.xml` were re-calibrated to provide a safe engine
   - Natural functional curling up to $180^\circ$ is $100\%$ penalty-free.
   - Pathological folding inward beyond $183^\circ$ into the palm casing is smoothly penalized, encouraging the policy to keep fingers extended as a supportive floor when objects roll.
 
+---
+
+## 30. Comprehensive Multi-Object Benchmark Evaluation (100 Iterations Per Object)
+
+### 1. Benchmark Protocol
+To establish a rigorous empirical baseline under the updated physical simulation environment (`palm_hearth` support cylinder, calibrated $120^\circ/100^\circ$ knuckle limits, and $3.20\text{ rad}$ flat-shelf penalty), all historical golden checkpoints and the active Stage 2C pipeline model were evaluated across **100 episodes per object** (100 Cylinder, 100 Cube, 100 Cuboid = 300 test episodes per model) under the full $90^\circ$ large-angle envelope ($\theta \in [0.60, 1.57\text{ rad}]$):
+
+### 2. Empirical Results Matrix (300 Episodes Total per Model):
+
+| Model Checkpoint | Success Rate (@15% Tol) | Success Rate (@20% Tol) | Object Retention | Rotational Closure | EMI Score | Mean Angular Error |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Stage 1 Golden** (`stage1_best_model.pth`) | $32.3\%$ | $32.3\%$ | $57.0\%$ | $42.6\%$ | $0.243$ | $69.5^\circ$ |
+| **Stage 2A Golden** (`stage2a_golden.pth`) | $35.3\%$ | $36.0\%$ | $66.0\%$ | $46.7\%$ | $0.308$ | $58.7^\circ$ |
+| **Stage 2B Golden** (`stage2b_golden.pth`) | $40.0\%$ | $40.0\%$ | $66.0\%$ | $52.0\%$ | $0.343$ | $56.8^\circ$ |
+| **Stage 2C Active Pipeline** (`ppo_best_actor.pth`) | **$40.3\%$** | **$40.3\%$** | **$66.0\%$** | **$52.3\%$** | **$0.345$** | **$56.6^\circ$** |
+
+### 3. Per-Object Diagnostic Breakdown (100 Episodes Each):
+
+| Model | Object | Success (@15%) | Retention Rate | Rotational Closure | EMI Score | Mean Error |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Stage 2B Golden** | **Cylinder** | $28.0\%$ | $40.0\%$ | $34.8\%$ | $0.139$ | $80.9^\circ$ |
+| | **Cube** | $36.0\%$ | $83.0\%$ | $54.1\%$ | $0.449$ | $40.3^\circ$ |
+| | **Cuboid** | **$56.0\%$** | **$75.0\%$** | **$67.1\%$** | **$0.503$** | **$49.2^\circ$** |
+| **Stage 2C Active** | **Cylinder** | $28.0\%$ | $40.0\%$ | $34.8\%$ | $0.139$ | $80.9^\circ$ |
+| | **Cube** | $37.0\%$ | $82.0\%$ | $54.6\%$ | $0.448$ | $40.6^\circ$ |
+| | **Cuboid** | **$56.0\%$** | **$76.0\%$** | **$67.5\%$** | **$0.513$** | **$48.3^\circ$** |
+
+### 4. Key Physical Insights:
+1. **Geometry-Dependent Retention**:
+   - **Cube**: Highest retention ($82\% - 83\%$) and lowest angular error ($40.3^\circ$). Flat faces provide stable multi-point contact platforms on the Delto fingertips.
+   - **Cuboid**: Highest rotational closure ($67.5\%$) and EMI ($0.513$). Elongated geometry offers high torque leverage, allowing the hand to pivot the object through large rotations.
+   - **Cylinder**: Retention drops to $40\%$. The smooth radial symmetry easily rolls off fingertips during large $90^\circ$ pivots if finger contact is broken, highlighting the need for active finger gaiting.
+2. **Clear Evolutionary Progression**:
+   - As curriculum tightens from Stage 1 $\to$ 2A $\to$ 2B $\to$ 2C, overall success under the full $90^\circ$ envelope scales from $32.3\% \to 35.3\% \to 40.0\% \to 40.3\%$, while EMI improves from $0.243 \to 0.345$.
+
+
 

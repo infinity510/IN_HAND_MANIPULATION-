@@ -990,3 +990,28 @@ When physical collision was initially enabled on `base_link`, the interactive vi
 3. **Curriculum Expansion to 25,000 Iterations:**
    Given the tighter $15\%$ error margin, newly enforced knuckle curl constraints, and flat-shelf platform dynamics, training iterations for Stage 2C, 2D, and 2E were expanded from 10,000 to **25,000 iterations per stage** to allow deep gait optimization and multi-object mastery.
 
+---
+
+## 29. Recalibration of Knuckle Angle Range: Safe Official Standards vs Over-Restriction
+
+### 1. The Over-Clamping Dilemma
+- In the initial attempt to prevent the "finger tucking through body" artifact, distal joint ranges were clamped aggressively to $m3 \le 80^\circ$ and $m4 \le 75^\circ$ ($155^\circ$ combined curl).
+- While this physically prevented any possibility of casing penetration, it over-restricted the kinematic dexterity of the Delto-3F gripper:
+  1. The fingers could no longer curl sufficiently to wrap around smaller objects or secure firm force-closure pinches.
+  2. The policy was stripped of essential recovery motions when objects shifted during large $90^\circ$ rotations.
+  3. The official hardware specifications allow up to $145^\circ$ on `m3` and $116^\circ$ on `m4`. Clamping to $80^\circ / 75^\circ$ removed nearly $40\%$ of the gripper's operational range.
+
+### 2. Calibrated Safe Official Limits
+The joint limits in `scene_cube.xml` were re-calibrated to provide a safe engineering buffer just below official physical limits:
+- **`gripper_f*m3_joint`**: `range="-0.0873 2.0944"` ($120.0^\circ$, vs official $145.0^\circ$ max).
+- **`gripper_f*m4_joint`**: `range="-0.0873 1.7453"` ($100.0^\circ$, vs official $116.0^\circ$ max).
+- **Combined Curl Headroom**: $220.0^\circ$ ($3.84\text{ rad}$), restoring full dexterous workspace and grasping dexterity while preventing structural motor stalling.
+
+### 3. Regularization Threshold Tuning
+- In `train_ppo.py`, the `flat_shelf_penalty` threshold was tuned to $3.20\text{ rad}$ ($\approx 183.3^\circ$ combined curl):
+  $$\text{penalty}_{\text{flat}} = 1.5 \sum_{i=1}^3 \max(0, \text{curl}_i - 3.20\text{ rad})^2$$
+- **Effect**:
+  - Natural functional curling up to $180^\circ$ is $100\%$ penalty-free.
+  - Pathological folding inward beyond $183^\circ$ into the palm casing is smoothly penalized, encouraging the policy to keep fingers extended as a supportive floor when objects roll.
+
+

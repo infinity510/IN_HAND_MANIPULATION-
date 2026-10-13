@@ -24,11 +24,11 @@
         <geom contype="1" conaffinity="0" pos="0.010322 0.000267674 0.0135906" quat="0.982248 -0.0130424 0.186916 -0.00903989" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_02"/>
         <body name="gripper_f1_03_link" pos="0.02022 0 0.03136" quat="0.5 -0.5 -0.5 -0.5">
           <inertial pos="0.014 -0.0004527 -3.953e-05" mass="0.051" diaginertia="1.69122e-05 1.49403e-05 6.50553e-06"/>
-          <joint name="gripper_f1m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3963" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+          <joint name="gripper_f1m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 2.0944" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
           <geom contype="1" conaffinity="0" pos="0.0190346 -0.000761178 0.000157348" quat="0.499589 0.485884 0.498796 0.515296" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_03"/>
           <body name="gripper_f1_04_link" pos="0.0434 0 0">
             <inertial pos="0.0180423 -0.000265186 -3.82115e-05" quat="0.502534 0.501012 0.497465 0.498974" mass="0.071" diaginertia="2.27675e-05 1.78556e-05 1.24573e-05"/>
-            <joint name="gripper_f1m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3090" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+            <joint name="gripper_f1m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.7453" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
             <geom contype="1" conaffinity="0" pos="0.0119923 -0.000772699 -5.20111e-06" quat="0.475945 0.47584 0.524828 0.52116" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_04"/>
             <geom contype="1" conaffinity="0" pos="0.0449594 -0.000422631 2.30189e-07" quat="0.512413 0.512458 0.487263 0.487231" type="mesh" rgba="1 1 1 1" mesh="link_tip_high"/>
             <geom type="sphere" size="0.012" pos="0.0449 0 0" rgba="0 1 0 0.5" contype="1" conaffinity="0" solimp="0.99 0.99 0.001" solref="0.002 1"/>
@@ -46,11 +46,11 @@
         <geom contype="1" conaffinity="0" pos="0.010322 0.000267674 0.0135906" quat="0.982248 -0.0130424 0.186916 -0.00903989" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_02"/>
         <body name="gripper_f2_03_link" pos="0.02022 0 0.03136" quat="0.500398 -0.5 -0.5 -0.499602">
           <inertial pos="0.014 -0.0004527 -3.953e-05" mass="0.051" diaginertia="1.69122e-05 1.49403e-05 6.50553e-06"/>
-          <joint name="gripper_f2m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3963" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+          <joint name="gripper_f2m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 2.0944" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
           <geom contype="1" conaffinity="0" pos="0.0190346 -0.000761178 0.000157348" quat="0.499589 0.485884 0.498796 0.515296" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_03"/>
           <body name="gripper_f2_04_link" pos="0.0434 0 0">
             <inertial pos="0.0180423 -0.000265186 -3.82115e-05" quat="0.502534 0.501012 0.497465 0.498974" mass="0.071" diaginertia="2.27675e-05 1.78556e-05 1.24573e-05"/>
-            <joint name="gripper_f2m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3090" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+            <joint name="gripper_f2m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.7453" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
             <geom contype="1" conaffinity="0" pos="0.0119923 -0.000772699 -5.20111e-06" quat="0.475945 0.47584 0.524828 0.52116" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_04"/>
             <geom contype="1" conaffinity="0" pos="0.0449594 -0.000422631 2.30189e-07" quat="0.512413 0.512458 0.487263 0.487231" type="mesh" rgba="1 1 1 1" mesh="link_tip_high"/>
             <geom type="sphere" size="0.012" pos="0.0449 0 0" rgba="0 1 0 0.5" contype="1" conaffinity="0" solimp="0.99 0.99 0.001" solref="0.002 1"/>
@@ -68,11 +68,11 @@
         <geom contype="1" conaffinity="0" pos="0.010322 0.000267674 0.0135906" quat="0.982248 -0.0130424 0.186916 -0.00903989" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_02"/>
         <body name="gripper_f3_03_link" pos="0.02022 0 0.03136" quat="0.500398 -0.5 -0.5 -0.499602">
           <inertial pos="0.014 -0.0004527 -3.953e-05" mass="0.051" diaginertia="1.69122e-05 1.49403e-05 6.50553e-06"/>
-          <joint name="gripper_f3m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3963" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+          <joint name="gripper_f3m3_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 2.0944" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
           <geom contype="1" conaffinity="0" pos="0.0190346 -0.000761178 0.000157348" quat="0.499589 0.485884 0.498796 0.515296" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_03"/>
           <body name="gripper_f3_04_link" pos="0.0434 0 0">
             <inertial pos="0.0180423 -0.000265186 -3.82115e-05" quat="0.502534 0.501012 0.497465 0.498974" mass="0.071" diaginertia="2.27675e-05 1.78556e-05 1.24573e-05"/>
-            <joint name="gripper_f3m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.3090" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
+            <joint name="gripper_f3m4_joint" pos="0 0 0" axis="0 0 1" limited="true" range="-0.0873 1.7453" solimplimit="0.999 0.9999 0.001" solreflimit="0.002 1" actuatorfrcrange="-10 10" damping="1.1" frictionloss="1.1"/>
             <geom contype="1" conaffinity="0" pos="0.0119923 -0.000772699 -5.20111e-06" quat="0.475945 0.47584 0.524828 0.52116" type="mesh" rgba="0.196 0.196 0.196 1" mesh="link_04"/>
             <geom contype="1" conaffinity="0" pos="0.0449594 -0.000422631 2.30189e-07" quat="0.512413 0.512458 0.487263 0.487231" type="mesh" rgba="1 1 1 1" mesh="link_tip_high"/>
             <geom type="sphere" size="0.012" pos="0.0449 0 0" rgba="0 1 0 0.5" contype="1" conaffinity="0" solimp="0.99 0.99 0.001" solref="0.002 1"/>

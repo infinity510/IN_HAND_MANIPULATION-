@@ -88,6 +88,9 @@ class RewardWeights:
     w7: float = 0.20    # Zero contact penalty: relaxed penalty when contact points momentarily drop during gaiting
     w_alive: float = 0.80 # Grasp survival / retention reward: continuous positive reward while object is safely in hand
     w_step_penalty: float = 0.00 # Flat step penalty: set to 0.00 to prevent suicidal agent trap
+    w_angvel_brake: float = 0.50 # Object angular velocity braking penalty weight near target
+    w_anti_stall: float = 0.25   # Anti-stall motion penalty weight when object freezes outside target
+    w_lock_bonus: float = 0.50   # Precision grasp lock-in bonus weight for multi-point contact at goal
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.20     # Target orientation error threshold as ratio of initial angle (e.g. 0.20 = 20%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -157,6 +160,9 @@ class PPOConfig:
     w7: float = 0.30                 # Zero contact penalty (relaxed)
     w_alive: float = 1.20            # Grasp survival / retention reward
     w_step_penalty: float = 0.00     # Step time penalty (0.0 to prevent suicide shortcut)
+    w_angvel_brake: float = 0.50     # Object angular velocity braking penalty weight near target
+    w_anti_stall: float = 0.25       # Anti-stall motion penalty weight when object freezes outside target
+    w_lock_bonus: float = 0.50       # Precision grasp lock-in bonus weight for multi-point contact at goal
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -620,11 +626,32 @@ class DeltoInHandManipulationEnv:
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
         
+        # (c2) Object Angular Velocity Extraction & Braking near Target:
+        # Extracts 3D angular velocity (rad/s) from object freejoint dof
+        obj_dof = self.model.jnt_dofadr[self.model.joint(f"obj_{self.active_object_id}_joint").id]
+        obj_angvel_norm = float(np.linalg.norm(self.data.qvel[obj_dof+3:obj_dof+6]))
+        
+        # Heavily damps object rotational momentum as it approaches target tolerance (rel_error < 0.10),
+        # preventing high-speed overshoot and slip outside the 5% tolerance window.
+        w_brake = getattr(w, 'w_angvel_brake', 0.50)
+        angvel_damping = w_brake * (obj_angvel_norm ** 2) * float(np.exp(- min(4.0, rel_error / 0.10)))
+        
+        # (c3) Anti-Stall Motion Pressure:
+        # Penalizes stationary freezing (||omega_obj|| < 0.03 rad/s) outside the tolerance window (rel_error > epsilon_ratio),
+        # breaking static contact equilibrium and forcing active fingertip micro-adjustments.
+        w_stall = getattr(w, 'w_anti_stall', 0.25)
+        stall_penalty = w_stall if (obj_angvel_norm < 0.03 and rel_error > w.epsilon_ratio) else 0.0
+        
         # (d) Distance from palm center
         dist_to_palm = float(np.linalg.norm(obj_pos - self.palm_position))
         
-        # (e) Contact points
+        # (e) Contact points & Precision Lock-In Bonus
         n_c = self.count_contacts()
+        
+        # Strongly rewards multi-finger contact stabilization (up to 4 contact points) when entering the precision target zone,
+        # providing active incentive to clamp and hold the object securely at the goal orientation.
+        w_lock = getattr(w, 'w_lock_bonus', 0.50)
+        lock_bonus = w_lock * min(n_c, 4) * float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
         
         # 5. Evaluate Indicator Functions & Continuous Goal Resampling
         is_success_this_step = bool(d_theta < self.current_epsilon)
@@ -669,11 +696,14 @@ class DeltoInHandManipulationEnv:
             + progress_reward
             + precision_bonus
             + alive_reward
+            + lock_bonus
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
             - flat_shelf_penalty
             - (w.w3 * vel_norm_sq)
+            - angvel_damping
+            - stall_penalty
             + term_success_bonus
             - drop_penalty
             + (w.w6 * float(n_c))
@@ -1288,6 +1318,9 @@ class PPOFineTuner:
                     w7=getattr(self.cfg, 'w7', 0.20),
                     w_alive=getattr(self.cfg, 'w_alive', 0.80),
                     w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.00),
+                    w_angvel_brake=getattr(self.cfg, 'w_angvel_brake', 0.50),
+                    w_anti_stall=getattr(self.cfg, 'w_anti_stall', 0.25),
+                    w_lock_bonus=getattr(self.cfg, 'w_lock_bonus', 0.50),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -1946,7 +1979,7 @@ def parse_args():
     parser.add_argument("--rollout_steps", type=int, default=2048, help="Rollout buffer steps per iteration")
     parser.add_argument("--batch_size", type=int, default=64, help="Minibatch size for SGD updates")
     parser.add_argument("--ppo_epochs", type=int, default=5, help="Epochs per rollout update (default: 5)")
-    parser.add_argument("--warmup_iters", type=int, default=0, help="Critic warm-up iterations where Actor is frozen (default: 0)")
+    parser.add_argument("--warmup_iters", "--warmup_iterations", dest="warmup_iters", type=int, default=0, help="Critic warm-up iterations where Actor is frozen (default: 0)")
     parser.add_argument("--warmup_max_goal_angle", type=float, default=None, help="Optional goal angle cap during warmup in radians")
     parser.add_argument("--warmup_epsilon_ratio", type=float, default=None, help="Optional error tolerance ratio during warmup")
     parser.add_argument("--actor_lr", type=float, default=1.5e-5, help="Actor learning rate (default: 1.5e-5)")
@@ -1980,6 +2013,9 @@ def parse_args():
     parser.add_argument("--w7", type=float, default=0.20, help="Zero contact penalty weight (default: 0.20)")
     parser.add_argument("--w_alive", type=float, default=0.80, help="Grasp retention / survival reward weight (default: 0.80)")
     parser.add_argument("--w_step_penalty", type=float, default=0.00, help="Step time penalty (default: 0.00)")
+    parser.add_argument("--w_angvel_brake", type=float, default=0.50, help="Object angular velocity braking weight near target (default: 0.50)")
+    parser.add_argument("--w_anti_stall", type=float, default=0.25, help="Anti-stall penalty weight when stationary outside goal (default: 0.25)")
+    parser.add_argument("--w_lock_bonus", type=float, default=0.50, help="Precision grasp lock-in bonus weight for multi-point contacts at goal (default: 0.50)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
@@ -2069,6 +2105,9 @@ def main():
         w7=args.w7,
         w_alive=args.w_alive,
         w_step_penalty=args.w_step_penalty,
+        w_angvel_brake=args.w_angvel_brake,
+        w_anti_stall=args.w_anti_stall,
+        w_lock_bonus=args.w_lock_bonus,
         save_freq=args.save_freq,
         render=args.render,
         show_actions=args.show_actions,

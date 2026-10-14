@@ -242,12 +242,9 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                     env.current_max_steps = min(800, quad_steps)
                     env.set_epsilon(epsilon_ratio * theta_rad)
 
-                    # Determine reference axis that has maximal angular difference between initial and target
+                    # Reference axis: strictly the direction of the top surface of the object facing up (+Z in body frame)
                     half_height = 0.045 if obj_id == 2 else 0.07
-                    cur_rot_init = transform.Rotation.from_quat([cur_obj_quat[1], cur_obj_quat[2], cur_obj_quat[3], cur_obj_quat[0]])
-                    tgt_rot_init = transform.Rotation.from_quat([env.target_quat[1], env.target_quat[2], env.target_quat[3], env.target_quat[0]])
-                    candidate_axes = [np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])]
-                    episode_ref_axis = max(candidate_axes, key=lambda u: np.linalg.norm(cur_rot_init.apply(u) - tgt_rot_init.apply(u)))
+                    top_axis = np.array([0.0, 0.0, 1.0])
 
                     step = 0
                     terminated = False
@@ -266,8 +263,8 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                             peak_torque = cur_torque
 
                         # Real-time visual orientation arrows:
-                        # Red Arrow: Object's current 3D orientation
-                        # Green Arrow: Desired target 3D orientation
+                        # Red Arrow: Object's current top surface normal facing up
+                        # Green Arrow: Desired target top surface normal
                         try:
                             obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
                             cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
@@ -277,11 +274,12 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
 
                             # Base point: anchored on the top face of the object (above black marker)
                             # This ensures the arrows are prominently visible and never occluded inside the object body
-                            top_offset = cur_rot.apply(np.array([0.0, 0.0, half_height + 0.006]))
+                            top_offset = cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
                             base_point = obj_pos + top_offset
 
-                            cur_dir = cur_rot.apply(episode_ref_axis)
-                            tgt_dir = tgt_rot.apply(episode_ref_axis)
+                            # Strictly pointing along the direction of the top surface facing up:
+                            cur_dir = cur_rot.apply(top_axis)
+                            tgt_dir = tgt_rot.apply(top_axis)
 
                             arrow_len = 0.16
                             arrow_rad = 0.010

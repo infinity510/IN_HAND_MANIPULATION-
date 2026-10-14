@@ -229,3 +229,33 @@ Mean Angular Error:                 49.50° +/- 49.30°
 
 ```
 
+
+## Stage 2C (18% Tolerance Adaptation) (2026-10-14 15:29:14)
+
+```
+|   69.9%  |   90.0%  |   10.0%  |   20.0%  |  42.8°     | 454.3
+---------------------------------------------------------------------------------------------------------
+RANGE 2 TOTAL | 60       |   36.7%  |   53.8%  |   75.0%  |   25.0%  |   36.7%  |  62.9°     | 499.0
+  --> Range 2 Effective Manipulation Index (EMI): 0.4032 | Benchmark Score: 0.4946
+
+======================================================================================
+SECTION 3: GRAND COMPOSITE VERIFICATION SUMMARY (FULL 10° TO 90° ENVELOPE)
+======================================================================================
+Evaluation Metric                   | Range 1 (10°-40°)    | Range 2 (40°-90°)    | Grand Total    
+------------------------------------------------------------------------------------------------
+Total Evaluated Episodes            | 60                   | 60                   | 120            
+Success Rate (@10% Error)           | 93.3               % | 36.7               % | 65.0          %
+Mean Rotational Closure             | 94.2               % | 53.8               % | 74.0          %
+Pre-Goal Retention Rate             | 96.7               % | 75.0               % | 85.8          %
+Pre-Goal Drop Rate                  | 3.3                % | 25.0               % | 14.2          %
+Raw Drop Rate (All Steps)           | 20.0               % | 36.7               % | 28.3          %
+Mean Final Geodesic Error           | 38.4               ° | 62.9               ° | 50.6          °
+Mean Steps per Episode              | 305.1                | 499.0                | 402.1          
+Peak Hardware Torque                | 4.97             N·m | 6.55             N·m | 6.55        N·m
+Effective Manipulation Index (EMI)  | 0.9108               | 0.4032               | 0.6351         
+Composite Benchmark Score           | 0.9427               | 0.4946               | 0.7186         
+================================================================================================
+
+
+```
+

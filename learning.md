@@ -1177,8 +1177,46 @@ To evaluate the user's stopping criterion and true alignment precision under the
    - Iteration 1900 represents the optimal sweet spot between active gaiting reorientation ($62.1\%$ closure) and high retention ($79.3\%$).
 
 
+---
 
+## 35. Option A Architecture: Direct 10% Precision Targeting with Boosted Rotational Momentum
 
+### 1. Executive Decision & Alignment
+Following diagnostic benchmarks of the 19k+ checkpoint vs. the Iteration 1900 golden model, the user explicitly selected **Option A**:
+- **Target Precision**: Locked at **$10.0\%$ relative error tolerance** ($\epsilon_{\text{ratio}} = 0.10$).
+- **Success Criteria**: Consistently **$70\%\text{--}80\%$ success rate** across all three objects (Cube, Cuboid, Cylinder) with **$\ge 70\%$ pre-goal retention**.
+- **Global Budget**: Hard global cumulative ceiling of **70,000 total iterations** across the curriculum run.
+- **Continuous Execution**: Fully autonomous single execution loop without manual restarts.
 
+### 2. Algorithmic Rationale: Breaking the 5% Precision Clamping Trap
+Under extreme $5\%$ tolerance (sub-$2.5^\circ$ error requirement), policy gradients face an asymmetric payoff:
+1. Achieving sub-$2.5^\circ$ error requires high-risk, multi-finger re-grasping near the goal.
+2. Dropping an object incurs a severe $-15.0$ penalty.
+3. Consequently, the agent learned to rotate partially ($\approx 40\%$ closure) and clamp tightly to collect steady positive retention rewards, stalling success at $26\%\text{--}33\%$.
+
+Option A eliminates this pathology by locking tolerance at the user's operational standard of $10\%$ (sub-$6^\circ$ alignment on $60^\circ$ goals). At $10\%$ tolerance, the Iteration 1900 golden baseline already demonstrates **$52.0\%$ success, $79.3\%$ retention, and $62.1\%$ closure**.
+
+### 3. Option A Hyperparameter Configuration:
+
+| Hyperparameter | Value in Option A | Baseline Value | Operational Rationale |
+| :--- | :--- | :--- | :--- |
+| **Initial Weights** | `stage2_iter1900_golden_52pct.pth` | Random / Clamped 20k | Re-seeds from peak 52.0% benchmark performance. |
+| **Error Tolerance ($\epsilon_{\text{ratio}}$)** | **$0.10$ ($10.0\%$)** | $0.15 \to 0.05$ | Directly targets the operational 10% precision goal. |
+| **Tolerance Floor ($\epsilon_{\min}$)** | **$0.10$ ($10.0\%$)** | $0.03$ ($3.0\%$) | Prevents plateau breaker from dropping into clamping trap. |
+| **Progress Reward ($w_{\text{progress}}$)** | **$12.0$** | $8.5$ | $+41\%$ boost to aggressively drive active finger gaiting. |
+| **Orientation Shaping ($w_1$)** | **$2.5$** | $1.5$ | $+67\%$ boost for strong continuous angular attraction. |
+| **Precision Reward ($w_{\text{precision}}$)** | **$6.0$** | $5.0$ | Sharpens alignment inside the $10\%$ acceptance radius. |
+| **Terminal Success Bonus ($w_4$)** | **$50.0$** | $45.0$ | High terminal reward for completing rotations. |
+| **Drop Penalty ($w_5$)** | **$15.0$** | $15.0$ | Preserves robust pre-goal retention ($\ge 70\%$). |
+| **Angle Range ($\theta$)** | **$[0.15, 1.57]$ rad ($8.6^\circ\text{--}90.0^\circ$)** | $[0.60, 1.57]$ rad | Full spectrum provides frequent stepping-stone successes. |
+| **Plateau Agitation** | **Entropy $+0.0003$, $\theta_{\min} \le 0.20$** | Angle escalation | Injects exploration kicks without distorting angle distribution. |
+| **Object Sampling** | **Bounded Softmax ($28\%\text{--}38\%$)** | $50\%$ hard-negative | Balanced practice for Cylinder without starving Cube/Cuboid. |
+
+### 4. Background Evaluator & Stopping Criterion
+- **Asynchronous Evaluation Sidecar**: Runs across 4 parallel evaluation workers, evaluating milestone checkpoints every 100 iterations on **500 randomized episodes** across Cylinder, Cube, and Cuboid at $10\%$ error tolerance.
+- **Pre-Goal Retention Tracking**: Drops occurring *after* an initial goal has already been achieved (during continuous multi-goal resampling) do not count against retention for the stopping criterion.
+- **Autonomous Termination**: Training automatically saves the final golden model and terminates when either:
+  1. Background benchmark verifies $\text{Success} \ge 70.0\%$ and $\text{Retention} \ge 70.0\%$ at $\epsilon_{\text{ratio}} \le 0.10$.
+  2. Total iterations reach the cumulative 70,000 iteration ceiling.
 
 

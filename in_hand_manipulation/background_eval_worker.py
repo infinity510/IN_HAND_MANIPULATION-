@@ -210,7 +210,7 @@ def main():
                 epsilon_ratio=args.epsilon_ratio
             )
             best_score = base_metrics["score"]
-            print(f"  Existing Baseline Benchmark Score: {best_score:.4f} (Succ: {base_metrics['success_rate']*100:.1f}%, Clos: {base_metrics['mean_closure']*100:.1f}%, Drop: {base_metrics['drop_rate']*100:.1f}%) in {time.time()-t0:.1f}s\n", flush=True)
+            print(f"  Existing Baseline Benchmark Score: {best_score:.4f} (Succ: {base_metrics['success_rate']*100:.1f}%, Clos: {base_metrics['mean_closure']*100:.1f}%, Ret: {base_metrics['pre_goal_retention']*100:.1f}%, Drop: {base_metrics['pre_goal_drop_rate']*100:.1f}%) in {time.time()-t0:.1f}s\n", flush=True)
         except Exception as e:
             print(f"  Could not evaluate initial baseline: {e}")
             

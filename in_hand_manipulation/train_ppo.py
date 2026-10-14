@@ -1781,32 +1781,33 @@ class PPOFineTuner:
                         gain = best_emi_score - plateau_benchmark_score
                         if gain < 0.015:
                             old_eps = self.cfg.epsilon_ratio
-                            if old_eps > 0.10:
+                            min_eps = getattr(self.cfg, 'min_epsilon_ratio', 0.10)
+                            if old_eps > 0.10 and min_eps < 0.10:
                                 new_eps = 0.10
                                 ladder_msg = "Escalating Tolerance Ladder: 15% -> 10% Error"
-                            elif old_eps > 0.05:
-                                new_eps = 0.05
-                                ladder_msg = "Escalating Tolerance Ladder: 10% -> 5% Extreme Precision"
+                            elif old_eps > min_eps:
+                                new_eps = min_eps
+                                ladder_msg = f"Escalating Tolerance Ladder: {old_eps*100:.1f}% -> {new_eps*100:.1f}% Error"
                             else:
-                                new_eps = 0.05
-                                ladder_msg = "Maintained at 5% Extreme Precision (Exploration Kick)"
+                                new_eps = old_eps
+                                ladder_msg = f"Maintained at {new_eps*100:.1f}% Target Precision (Exploration Kick & Basin Agitation)"
                                 
                             self.cfg.epsilon_ratio = new_eps
                             self.vec_env.set_epsilon_ratio(new_eps)
                             
                             old_min_angle = getattr(self.cfg, 'min_goal_angle', 0.15)
-                            new_min_angle = min(0.35, old_min_angle + 0.05)
+                            new_min_angle = min(0.20, old_min_angle + 0.01)
                             self.cfg.min_goal_angle = new_min_angle
                             self.vec_env.set_min_goal_angle(new_min_angle)
                             
-                            self.cfg.entropy_coef = base_entropy_coef + 0.0002
-                            entropy_boost_remaining = 250
+                            self.cfg.entropy_coef = base_entropy_coef + 0.0003
+                            entropy_boost_remaining = 300
                             
                             print("\n" + "!"*75)
                             print(f"[PLATEAU BREAKER TRIGGERED @ Iter {iteration}] No improvement (gain {gain:+.4f}) over {self.cfg.plateau_window} iters.")
                             print(f"  -> {ladder_msg} (EpsR: {old_eps*100:.1f}% -> {new_eps*100:.1f}%)")
-                            print(f"  -> Raised min goal angle: {np.degrees(old_min_angle):.1f}° -> {np.degrees(new_min_angle):.1f}°")
-                            print(f"  -> Injected temporary exploration entropy boost (+0.0002 for 250 iters)")
+                            print(f"  -> Gentle min goal angle: {np.degrees(old_min_angle):.1f}° -> {np.degrees(new_min_angle):.1f}°")
+                            print(f"  -> Injected temporary exploration entropy boost (+0.0003 for 300 iters)")
                             print("!"*75 + "\n")
                         plateau_benchmark_score = best_emi_score
                         last_plateau_check_iter = iteration

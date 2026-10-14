@@ -179,6 +179,7 @@ def run_training_stage(
     checkpoint_in: str,
     iterations: int = 25000,
     epsilon_ratio: float = 0.25,
+    min_epsilon_ratio: float = 0.10,
     max_goal_angle: float = 1.57,
     warmup_iters: int = 0,
     warmup_max_goal_angle: float = None,
@@ -193,13 +194,19 @@ def run_training_stage(
     max_log_std: float = -2.0,
     entropy_coef: float = 0.0003,
     reset_log_std: bool = False,
+    force_seed_checkpoint: bool = False,
     eval_script: str = "in_hand_manipulation/evaluate_stage2.py"
 ) -> str:
     """Executes a training stage, prints telemetry every 500 iters, cleans up, and evaluates."""
     log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations} (Warmup={warmup_iters})\n{'='*75}")
     os.makedirs(output_dir, exist_ok=True)
     best_actor_dest = os.path.join(output_dir, "ppo_best_actor.pth")
-    if not os.path.exists(best_actor_dest) and os.path.exists(checkpoint_in):
+    if force_seed_checkpoint and os.path.exists(checkpoint_in):
+        shutil.copy2(checkpoint_in, best_actor_dest)
+        shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_latest_actor.pth"))
+        shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_training_best_actor.pth"))
+        log(f"  [Force Re-Seed] Re-seeded active models in {output_dir} with golden baseline: {checkpoint_in}")
+    elif not os.path.exists(best_actor_dest) and os.path.exists(checkpoint_in):
         shutil.copy2(checkpoint_in, best_actor_dest)
         log(f"  [Baseline Initialized] Seeded incoming model {checkpoint_in} -> {best_actor_dest}")
 
@@ -217,9 +224,10 @@ def run_training_stage(
                         start_iteration = cur_completed + 1
                     elif cur_completed > 0:
                         start_iteration = cur_completed + 1
-                        latest_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
-                        if os.path.exists(latest_ckpt):
-                            checkpoint_in = latest_ckpt
+                        if not force_seed_checkpoint:
+                            latest_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
+                            if os.path.exists(latest_ckpt):
+                                checkpoint_in = latest_ckpt
                         log(f"  [Auto-Resume] Detected existing progress in {output_dir}: Resuming from iteration {start_iteration} to {iterations} using {checkpoint_in}")
         except Exception as e:
             log(f"  [Auto-Resume Warning] Could not parse existing progress.csv: {e}")
@@ -262,6 +270,7 @@ def run_training_stage(
             "--w4", str(w4),
             "--w5", str(w5),
             "--epsilon_ratio", str(epsilon_ratio),
+            "--min_epsilon_ratio", str(min_epsilon_ratio),
             "--max_goal_angle", str(max_goal_angle),
             "--min_goal_angle", "0.15",
             "--actor_lr", str(actor_lr),
@@ -386,48 +395,50 @@ def main():
     log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
     current_model = s2b_golden
 
-    # Stage 2 Master Unified Run (15% -> 10% -> 5% Error Tolerance Ladder, 70,000 Iteration Total Cap)
-    # Automatically steps down tolerance on plateau, dynamically oversamples harder objects,
-    # and halts when either 70,000 total iterations are reached OR consistently 70%-80% accuracy is achieved at <= 10% error!
+    # Stage 2 Target-10% Precision Master Run (Option A: 70k Cap)
+    # Target: Consistently 70%-80% accuracy at <= 10% error tolerance across all objects
+    # Base weights: Re-seeded from Iteration 1900 golden model (52.0% benchmark success at 10% error)
+    # Boosted progress rewards (w_progress=12.0, w1=2.5, w_precision=6.0, w4=50.0) to aggressively incentivize finger gaiting rotation
     unified_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
+    golden_1900 = os.path.join(unified_dir, "stage2_iter1900_golden_52pct.pth")
     if not is_stage_fully_completed(unified_dir, 70000):
         current_model = run_training_stage(
-            stage_name="Stage 2 Unified Master Run (15% -> 10% -> 5% Ladder, 70k Cap)",
+            stage_name="Stage 2 Target-10% Precision Run (Option A: 70k Cap)",
             output_dir=unified_dir,
-            checkpoint_in=current_model,
+            checkpoint_in=golden_1900,
             iterations=70000,
-            epsilon_ratio=0.15,
+            epsilon_ratio=0.10,
+            min_epsilon_ratio=0.10,
             max_goal_angle=1.57,
-            warmup_iters=400,
-            warmup_max_goal_angle=1.57,
-            warmup_epsilon_ratio=0.15,
-            w1=1.5,
-            w_progress=8.5,
-            w_precision=5.0,
-            w4=45.0,
+            warmup_iters=0,
+            w1=2.5,
+            w_progress=12.0,
+            w_precision=6.0,
+            w4=50.0,
             w5=15.0,
             actor_lr=1.4e-5,
             critic_lr=7e-5,
             max_log_std=-2.0,
             entropy_coef=0.0003,
             reset_log_std=False,
+            force_seed_checkpoint=True,
             eval_script="in_hand_manipulation/evaluate_stage2.py"
         )
     else:
         current_model = os.path.join(unified_dir, "ppo_best_actor.pth")
 
     # Comprehensive 60-episode Stage 2 Grand Final Verification Benchmark (20 per object)
-    log("Running 60-episode Stage 2 Grand Final Verification (Sub-5% Error Margin, All Objects)...")
+    log("Running 60-episode Stage 2 Grand Final Verification (Sub-10% Error Margin, All Objects)...")
     code, stage2_final_eval = run_cmd([
         "python3", "in_hand_manipulation/evaluate_comprehensive.py",
         "--checkpoint", current_model,
         "--max_goal_angle", "1.57",
         "--episodes_per_object", "20"
     ])
-    append_report("Stage 2 Grand Final Benchmark (60 Episodes, 90° Gaiting, Sub-5% Error)", stage2_final_eval[-2000:])
-    git_commit_and_push("feat(curriculum): Stage 2 full completion of Unified Master Run through 70k cap / 70% accuracy at <=10% error")
+    append_report("Stage 2 Grand Final Benchmark (60 Episodes, 90° Gaiting, Sub-10% Error)", stage2_final_eval[-2000:])
+    git_commit_and_push("feat(curriculum): Stage 2 full completion of Target-10% Precision Run through 70k cap / 70% accuracy at <=10% error")
 
-    log("=== STAGE 2 UNIFIED MASTER RUN COMPLETED SUCCESSFULLY! ===")
+    log("=== STAGE 2 MASTER RUN COMPLETED SUCCESSFULLY! ===")
 
 
 if __name__ == "__main__":

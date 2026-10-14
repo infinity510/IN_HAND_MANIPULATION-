@@ -196,7 +196,7 @@ def run_training_stage(
     entropy_coef: float = 0.0003,
     reset_log_std: bool = False,
     force_seed_checkpoint: bool = False,
-    eval_script: str = "in_hand_manipulation/evaluate_comprehensive.py"
+    eval_script: str = "in_hand_manipulation/evaluate.py"
 ) -> str:
     """Executes a training stage, prints telemetry every 500 iters, cleans up, and evaluates."""
     log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations} (Warmup={warmup_iters})\n{'='*75}")
@@ -337,12 +337,12 @@ def run_training_stage(
     best_ckpt = os.path.join(output_dir, "ppo_best_actor.pth")
     summary_text = ""
     if os.path.exists(best_ckpt):
-        log(f"Running Final Stage Comprehensive Benchmark using evaluate_comprehensive.py...")
+        log(f"Running Final Stage Comprehensive Benchmark using evaluate.py...")
         eval_cmd = [
-            "python3", "in_hand_manipulation/evaluate_comprehensive.py",
+            "python3", "in_hand_manipulation/evaluate.py",
             "--checkpoint", best_ckpt,
-            "--episodes_per_object", "10",
-            "--max_goal_angle", str(max_goal_angle)
+            "--episodes_per_range", "20",
+            "--num_workers", "8"
         ]
         _, eval_summary = run_cmd(eval_cmd)
         summary_text = eval_summary[-2000:] if len(eval_summary) > 2000 else eval_summary
@@ -386,23 +386,15 @@ def main():
     # =========================================================================
     log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING\n" + "#"*75)
 
-    # Stage 2A: 90° at EpsR = 25% (Completed 14,080 iters, verified best model at Iter 9956)
-    s2a_best = os.path.join(PROJECT_ROOT, "stage2a_eps25", "stage2a_golden.pth")
-    if not os.path.exists(s2a_best):
-        s2a_best = os.path.join(PROJECT_ROOT, "stage2a_eps25", "ppo_best_actor.pth")
-    log(f"Stage 2A (25% Error) completed. Using verified golden model: {s2a_best}")
-
-    # Stage 2B: 90° at EpsR = 20% (Completed 3,103 iters, benchmark verified Iter 3103 model: 72% succ, 56.6% clos, 0.385 EMI)
-    s2b_golden = os.path.join(PROJECT_ROOT, "stage2b_eps20", "stage2b_golden.pth")
-    log(f"Stage 2B (20% Error) promoted with verified golden model (72% benchmark success): {s2b_golden}")
-    current_model = s2b_golden
-
     # Stage 2 Target-10% Precision Master Run (Option A: 70k Cap)
     # Target: Consistently 70%-80% accuracy at <= 10% error tolerance across all objects
-    # Base weights: Re-seeded from Iteration 1900 golden model (52.0% benchmark success at 10% error)
-    # Boosted progress rewards (w_progress=12.0, w1=2.5, w_precision=6.0, w4=50.0) to aggressively incentivize finger gaiting rotation
+    # Base weights: Re-seeded directly from best_model/best_model.pth champion baseline
     unified_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
     champion_model = os.path.join(PROJECT_ROOT, "best_model", "best_model.pth")
+    if not os.path.exists(champion_model):
+        raise FileNotFoundError(f"Champion baseline model not found at {champion_model}")
+    log(f"Proceeding to Stage 2 Target-10% Precision Run using champion baseline: {champion_model}")
+
     if not is_stage_fully_completed(unified_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2 Target-10% Precision Run (Option A: 70k Cap)",
@@ -425,20 +417,21 @@ def main():
             entropy_coef=0.0003,
             reset_log_std=False,
             force_seed_checkpoint=True,
-            eval_script="in_hand_manipulation/evaluate_comprehensive.py"
+            eval_script="in_hand_manipulation/evaluate.py"
         )
     else:
         current_model = os.path.join(unified_dir, "ppo_best_actor.pth")
 
-    # Comprehensive 60-episode Stage 2 Grand Final Verification Benchmark (20 per object)
-    log("Running 60-episode Stage 2 Grand Final Verification (Sub-10% Error Margin, All Objects)...")
+    # Grand Final Verification Benchmark using canonical evaluate.py
+    # (100 episodes Range 1 [10°-40°] + 100 episodes Range 2 [40°-90°] per object = 600 total episodes)
+    log("Running 600-episode Grand Final Stratified Benchmark (Range 1: 10°-40° and Range 2: 40°-90°)...")
     code, stage2_final_eval = run_cmd([
-        "python3", "in_hand_manipulation/evaluate_comprehensive.py",
+        "python3", "in_hand_manipulation/evaluate.py",
         "--checkpoint", current_model,
-        "--max_goal_angle", "1.57",
-        "--episodes_per_object", "20"
+        "--episodes_per_range", "100",
+        "--num_workers", "8"
     ])
-    append_report("Stage 2 Grand Final Benchmark (60 Episodes, 90° Gaiting, Sub-10% Error)", stage2_final_eval[-2000:])
+    append_report("Stage 2 Grand Final Stratified Benchmark (600 Episodes, 10°-90°, Sub-10% Error)", stage2_final_eval[-2000:])
     git_commit_and_push("feat(curriculum): Stage 2 full completion of Target-10% Precision Run through 70k cap / 70% accuracy at <=10% error")
 
     log("=== STAGE 2 MASTER RUN COMPLETED SUCCESSFULLY! ===")

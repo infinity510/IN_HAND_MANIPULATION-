@@ -202,7 +202,7 @@ def main():
             t0 = time.time()
             base_metrics = evaluate_checkpoint(
                 best_output, 
-                num_episodes=min(100, args.num_episodes), 
+                num_episodes=args.num_episodes, 
                 num_workers=args.num_workers,
                 scene_xml_path=args.scene_xml,
                 max_goal_angle=args.max_goal_angle,

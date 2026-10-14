@@ -1252,3 +1252,42 @@ Between Iteration 20,700 and Iteration 30,300 of the continuous run:
 - **Boosted Terminal Goal Bonus**: Raised $w_4 = 60.0$ so reaching the goal provides the dominant payoff.
 - **Initial Weights**: Re-seeded directly from `best_model/best_model.pth` ($63.3\%$ baseline) running toward the 70,000 global cumulative iteration cap.
 
+## 37. Canonical Stratified Evaluator & Complete Workspace Pruning
+
+### 1. Unified Canonical Evaluation Protocol (`in_hand_manipulation/evaluate.py`)
+To eliminate fragmented, redundant benchmark scripts, all evaluation logic was consolidated into a single standardized engine:
+- **Angle Range Stratification**:
+  1. **Range 1 ($10.0^\circ \text{ to } 40.0^\circ$)**: Small-to-medium rotation envelope.
+  2. **Range 2 ($40.0^\circ \text{ to } 90.0^\circ$)**: Full large-angle in-hand gaiting envelope.
+- **Protocol Envelope**:
+  - 100 episodes per range per object type (100 Range 1 + 100 Range 2 = 200 episodes/object).
+  - 3 Object Types: Cylinder (`obj_1`), Cube (`obj_2`), Cuboid (`obj_3`).
+  - Total: 600 randomized benchmark episodes per comprehensive run.
+- **Core CLI Flags**:
+  - `--checkpoint <path>`: Path to model weights (`.pth`).
+  - `--render`: Launches interactive 3D MuJoCo passive viewer (`mujoco.viewer.launch_passive`) with real-time physics synchronization.
+  - `--episodes_per_range`: Configurable sample count (default 100).
+  - `--num_workers`: Multi-worker parallel processing for headless runs (default 8).
+
+### 2. Empirical Verification on Champion Model (60 Stratified Episodes)
+Benchmarking `best_model/best_model.pth` across both angle ranges:
+
+| Evaluation Metric | Range 1 ($10^\circ\text{--}40^\circ$) | Range 2 ($40^\circ\text{--}90^\circ$) | Grand Composite Total |
+| :--- | :--- | :--- | :--- |
+| **Success Rate (@10% Error)** | **$90.0\%$** | **$36.7\%$** | **$63.3\%$** |
+| **Mean Rotational Closure** | **$90.4\%$** | **$59.9\%$** | **$75.1\%$** |
+| **Pre-Goal Retention Rate** | **$93.3\%$** | **$83.3\%$** | **$88.3\%$** |
+| **Pre-Goal Drop Rate** | $6.7\%$ | $16.7\%$ | $11.7\%$ |
+| **Raw Drop Rate (All Steps)** | $23.3\%$ | $23.3\%$ | $23.3\%$ |
+| **Mean Final Error** | $51.3^\circ$ | $49.2^\circ$ | $50.2^\circ$ |
+| **Effective Manipulation Index (EMI)** | **$0.8438$** | **$0.4991$** | **$0.6638$** |
+| **Peak Actuator Torque** | $4.79\text{ N}\cdot\text{m}$ | $6.37\text{ N}\cdot\text{m}$ | $6.37\text{ N}\cdot\text{m}$ ($\le 10\text{ N}\cdot\text{m}$) |
+
+- **Key Insight**: The policy exhibits near-mastery on small-to-medium rotations ($90.0\%$ success, $90.4\%$ closure in Range 1). The ongoing training directly tackles the remaining $40^\circ\text{--}90^\circ$ gaiting gap in Range 2.
+
+### 3. Full Workspace Pruning:
+- Removed obsolete evaluation scripts: `evaluate_10pct_best.py`, `evaluate_comprehensive.py`.
+- Removed legacy model checkpoint: `in_hand_manipulation/bc_actor_checkpoint.pth`.
+- Removed legacy stage directories: `stage2a_eps25/` and `stage2b_eps20/` (saving ~78 MB).
+- Removed unused root files: `WhatsApp Video 2026-09-18 at 3.07.18 PM.mp4`.
+- Preserved: `stage1/stage1_best_model.pth`, `best_model/best_model.pth`, and active `stage2_unified/`.

@@ -200,17 +200,6 @@ def run_training_stage(
 ) -> str:
     """Executes a training stage, prints telemetry every 500 iters, cleans up, and evaluates."""
     log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations} (Warmup={warmup_iters})\n{'='*75}")
-    os.makedirs(output_dir, exist_ok=True)
-    best_actor_dest = os.path.join(output_dir, "ppo_best_actor.pth")
-    if force_seed_checkpoint and os.path.exists(checkpoint_in):
-        shutil.copy2(checkpoint_in, best_actor_dest)
-        shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_latest_actor.pth"))
-        shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_training_best_actor.pth"))
-        log(f"  [Force Re-Seed] Re-seeded active models in {output_dir} with golden baseline: {checkpoint_in}")
-    elif not os.path.exists(best_actor_dest) and os.path.exists(checkpoint_in):
-        shutil.copy2(checkpoint_in, best_actor_dest)
-        log(f"  [Baseline Initialized] Seeded incoming model {checkpoint_in} -> {best_actor_dest}")
-
     start_iteration = 1
     prog_path = os.path.join(output_dir, "progress.csv")
     if os.path.exists(prog_path):
@@ -225,13 +214,23 @@ def run_training_stage(
                         start_iteration = cur_completed + 1
                     elif cur_completed > 0:
                         start_iteration = cur_completed + 1
-                        if not force_seed_checkpoint:
-                            latest_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
-                            if os.path.exists(latest_ckpt):
-                                checkpoint_in = latest_ckpt
+                        latest_ckpt = os.path.join(output_dir, "ppo_latest_actor.pth")
+                        if os.path.exists(latest_ckpt):
+                            checkpoint_in = latest_ckpt
                         log(f"  [Auto-Resume] Detected existing progress in {output_dir}: Resuming from iteration {start_iteration} to {iterations} using {checkpoint_in}")
         except Exception as e:
             log(f"  [Auto-Resume Warning] Could not parse existing progress.csv: {e}")
+
+    best_actor_dest = os.path.join(output_dir, "ppo_best_actor.pth")
+    if start_iteration == 1:
+        if force_seed_checkpoint and os.path.exists(checkpoint_in):
+            shutil.copy2(checkpoint_in, best_actor_dest)
+            shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_latest_actor.pth"))
+            shutil.copy2(checkpoint_in, os.path.join(output_dir, "ppo_training_best_actor.pth"))
+            log(f"  [Force Re-Seed] Initialized fresh run in {output_dir} with golden baseline: {checkpoint_in}")
+        elif not os.path.exists(best_actor_dest) and os.path.exists(checkpoint_in):
+            shutil.copy2(checkpoint_in, best_actor_dest)
+            log(f"  [Baseline Initialized] Seeded incoming model {checkpoint_in} -> {best_actor_dest}")
 
     if start_iteration <= iterations:
         # 1. Clean old stop flags
@@ -386,25 +385,27 @@ def main():
     # =========================================================================
     log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING\n" + "#"*75)
 
-    # Stage 2 Target-10% Precision Master Run (Option A: 70k Cap)
+    # Fine-Tune Training Master Run in fine_tune_training/
     # Target: Consistently 70%-80% accuracy at <= 10% error tolerance across all objects
+    # Evaluation Strategy: Stratified Range 1 (10°-40°) and Range 2 (40°-90°) across Cylinder, Cube, Cuboid
     # Base weights: Re-seeded directly from best_model/best_model.pth champion baseline
-    unified_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
+    # Warmup: First 400 iterations critic-only calibration, then full joint PPO up to 70k cap
+    fine_tune_dir = os.path.join(PROJECT_ROOT, "fine_tune_training")
     champion_model = os.path.join(PROJECT_ROOT, "best_model", "best_model.pth")
     if not os.path.exists(champion_model):
         raise FileNotFoundError(f"Champion baseline model not found at {champion_model}")
-    log(f"Proceeding to Stage 2 Target-10% Precision Run using champion baseline: {champion_model}")
+    log(f"Proceeding to Fine-Tune Training in {fine_tune_dir} using champion baseline: {champion_model}")
 
-    if not is_stage_fully_completed(unified_dir, 70000):
+    if not is_stage_fully_completed(fine_tune_dir, 70000):
         current_model = run_training_stage(
-            stage_name="Stage 2 Target-10% Precision Run (Option A: 70k Cap)",
-            output_dir=unified_dir,
+            stage_name="Fine-Tune Training (Stratified 2-Range Protocol)",
+            output_dir=fine_tune_dir,
             checkpoint_in=champion_model,
             iterations=70000,
             epsilon_ratio=0.10,
             min_epsilon_ratio=0.10,
             max_goal_angle=1.57,
-            warmup_iters=0,
+            warmup_iters=400,
             w1=2.5,
             w_progress=14.0,
             w_precision=6.0,
@@ -420,7 +421,7 @@ def main():
             eval_script="in_hand_manipulation/evaluate.py"
         )
     else:
-        current_model = os.path.join(unified_dir, "ppo_best_actor.pth")
+        current_model = os.path.join(fine_tune_dir, "ppo_best_actor.pth")
 
     # Grand Final Verification Benchmark using canonical evaluate.py
     # (100 episodes Range 1 [10°-40°] + 100 episodes Range 2 [40°-90°] per object = 600 total episodes)

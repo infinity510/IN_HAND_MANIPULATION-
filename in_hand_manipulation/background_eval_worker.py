@@ -32,22 +32,18 @@ if SCRIPT_DIR not in sys.path:
 from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 # Global worker state for multi-process pool
+# Global worker state for multi-process pool
 _worker_actor = None
 _worker_env = None
-_worker_max_goal_angle = 1.57
-_worker_min_goal_angle = 0.15
-_worker_epsilon_ratio = 0.20
+_worker_epsilon_ratio = 0.10
 
 
 def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio):
-    global _worker_actor, _worker_env, _worker_max_goal_angle, _worker_min_goal_angle, _worker_epsilon_ratio
+    global _worker_actor, _worker_env, _worker_epsilon_ratio
     torch.set_num_threads(1)
     _worker_actor = ActorNetwork(obs_dim=39, act_dim=12)
     _worker_actor.load_state_dict(state_dict, strict=False)
     _worker_actor.eval()
-    
-    _worker_max_goal_angle = max_goal_angle
-    _worker_min_goal_angle = min_goal_angle
     _worker_epsilon_ratio = epsilon_ratio
     
     _worker_env = DeltoInHandManipulationEnv(
@@ -55,7 +51,7 @@ def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_an
         obs_mean=obs_mean,
         obs_std=obs_std,
         max_episode_steps=250,
-        max_goal_angle=max_goal_angle,
+        max_goal_angle=1.5708,
         dr_ratio=0.20,
         steps_per_radian=200,
         bonus_steps_per_success=150,
@@ -63,15 +59,15 @@ def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_an
     )
 
 
-def _eval_single_episode(seed: int):
-    global _worker_actor, _worker_env, _worker_max_goal_angle, _worker_min_goal_angle, _worker_epsilon_ratio
+def _eval_single_episode(task_tuple):
+    global _worker_actor, _worker_env, _worker_epsilon_ratio
+    seed, range_id, obj_id, min_rad, max_rad = task_tuple
     np.random.seed(seed)
-    obj_id = (seed % 3) + 1  # Balanced rotation: 1=Cylinder, 2=Cube, 3=Cuboid
     obs, _ = _worker_env.reset(object_id=obj_id)
     
     axis = np.random.randn(3)
     axis /= (np.linalg.norm(axis) + 1e-8)
-    target_angle = float(np.random.uniform(_worker_min_goal_angle, _worker_max_goal_angle))
+    target_angle = float(np.random.uniform(min_rad, max_rad))
     rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
     q_xyzw = rand_rot.as_quat()
     _worker_env.target_quat = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
@@ -107,25 +103,27 @@ def _eval_single_episode(seed: int):
     tol_thresh_deg = _worker_epsilon_ratio * init_angle_deg
     is_success = bool(goals_achieved > 0 or final_err_deg <= tol_thresh_deg)
     
-    # Pre-goal drop accounting:
-    # Drops occurring AFTER a goal has already been achieved do NOT count against retention
-    # for the stopping criterion (as instructed: "no dropping before success like if u get success and change target then dont count that in the drop")
     dropped_before_success = bool(raw_dropped and (goals_achieved == 0))
+    pre_goal_retained = not dropped_before_success
     
     if goals_achieved > 0:
         closure = 1.0
-    elif raw_dropped:
+    elif dropped_before_success:
         closure = 0.0
     else:
         closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
         
     return {
+        "range_id": range_id,
+        "object_id": obj_id,
         "success": is_success,
+        "pre_goal_retained": pre_goal_retained,
         "dropped_before_success": dropped_before_success,
         "raw_dropped": raw_dropped,
         "closure": closure,
         "goals": goals_achieved,
         "steps": step,
+        "final_err_deg": final_err_deg,
     }
 
 
@@ -137,28 +135,65 @@ def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, sce
     
     init_args = (state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio)
     
+    # Construct balanced evaluation tasks:
+    # Range 1: 10° to 40° (0.17453 to 0.69813 rad)
+    # Range 2: 40° to 90° (0.69813 to 1.57080 rad)
+    # Balanced across 3 objects: Cylinder (1), Cube (2), Cuboid (3)
+    range_configs = [
+        (1, np.radians(10.0), np.radians(40.0)),
+        (2, np.radians(40.0), np.radians(90.0)),
+    ]
+    tasks = []
+    eps_per_bucket = max(1, num_episodes // 6)
+    task_idx = 0
+    for r_id, min_rad, max_rad in range_configs:
+        for obj_id in [1, 2, 3]:
+            for _ in range(eps_per_bucket):
+                seed = 70000 + task_idx
+                tasks.append((seed, r_id, obj_id, min_rad, max_rad))
+                task_idx += 1
+                
     ctx = mp.get_context("spawn")
     with ctx.Pool(num_workers, initializer=_init_eval_worker, initargs=init_args) as pool:
-        seeds = [1000 + i for i in range(num_episodes)]
-        results = pool.map(_eval_single_episode, seeds)
+        results = pool.map(_eval_single_episode, tasks)
         
     n = len(results)
-    succ_rate = sum(1 for r in results if r["success"]) / n
-    pre_goal_drop_rate = sum(1 for r in results if r["dropped_before_success"]) / n
-    pre_goal_retention = max(0.0, 1.0 - pre_goal_drop_rate)
-    raw_drop_rate = sum(1 for r in results if r["raw_dropped"]) / n
-    mean_closure = float(np.mean([r["closure"] for r in results]))
+    r1_res = [r for r in results if r["range_id"] == 1]
+    r2_res = [r for r in results if r["range_id"] == 2]
     
-    # Score prioritizing Success Rate and Pre-Goal Retention
-    score = succ_rate * pre_goal_retention * (0.5 + 0.5 * mean_closure)
+    r1_succ = sum(1 for r in r1_res if r["success"]) / max(1, len(r1_res))
+    r1_clos = float(np.mean([r["closure"] for r in r1_res])) if r1_res else 0.0
+    r1_ret = sum(1 for r in r1_res if r["pre_goal_retained"]) / max(1, len(r1_res))
+    
+    r2_succ = sum(1 for r in r2_res if r["success"]) / max(1, len(r2_res))
+    r2_clos = float(np.mean([r["closure"] for r in r2_res])) if r2_res else 0.0
+    r2_ret = sum(1 for r in r2_res if r["pre_goal_retained"]) / max(1, len(r2_res))
+    
+    overall_succ = sum(1 for r in results if r["success"]) / n
+    overall_clos = float(np.mean([r["closure"] for r in results]))
+    overall_ret = sum(1 for r in results if r["pre_goal_retained"]) / n
+    overall_drop = 1.0 - overall_ret
+    raw_drop_rate = sum(1 for r in results if r["raw_dropped"]) / n
+    
+    # Composite score prioritizing overall excellence across both angle ranges:
+    # 50% Success + 30% Closure + 20% Retention
+    score = (0.50 * overall_succ) + (0.30 * overall_clos) + (0.20 * overall_ret)
+    emi = overall_ret * overall_clos
     
     return {
-        "success_rate": succ_rate,
-        "pre_goal_drop_rate": pre_goal_drop_rate,
-        "pre_goal_retention": pre_goal_retention,
+        "success_rate": overall_succ,
+        "mean_closure": overall_clos,
+        "pre_goal_retention": overall_ret,
+        "pre_goal_drop_rate": overall_drop,
         "raw_drop_rate": raw_drop_rate,
-        "mean_closure": mean_closure,
         "score": score,
+        "emi": emi,
+        "r1_succ": r1_succ,
+        "r1_clos": r1_clos,
+        "r1_ret": r1_ret,
+        "r2_succ": r2_succ,
+        "r2_clos": r2_clos,
+        "r2_ret": r2_ret,
         "episodes": n,
     }
 
@@ -210,7 +245,7 @@ def main():
                 epsilon_ratio=args.epsilon_ratio
             )
             best_score = base_metrics["score"]
-            print(f"  Existing Baseline Benchmark Score: {best_score:.4f} (Succ: {base_metrics['success_rate']*100:.1f}%, Clos: {base_metrics['mean_closure']*100:.1f}%, Ret: {base_metrics['pre_goal_retention']*100:.1f}%, Drop: {base_metrics['pre_goal_drop_rate']*100:.1f}%) in {time.time()-t0:.1f}s\n", flush=True)
+            print(f"  Existing Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
         except Exception as e:
             print(f"  Could not evaluate initial baseline: {e}")
             
@@ -290,21 +325,23 @@ def main():
                             shutil.copy2(ckpt_file, champion_path)
                             readme_path = os.path.join(champion_dir, "README.md")
                             with open(readme_path, "w") as rf:
-                                rf.write("# Best Champion Model (Stage 2 Large-Angle In-Hand Manipulation)\n\n")
+                                rf.write("# Best Champion Model (Stratified In-Hand Manipulation)\n\n")
                                 rf.write(f"- **Checkpoint File**: `best_model.pth`\n")
                                 rf.write(f"- **Source**: Iteration {it}\n")
-                                rf.write(f"- **Target Precision Envelope**: 10.0% Relative Error Tolerance, 90° Large-Angle Envelope (1.57 rad)\n")
-                                rf.write(f"- **Benchmark Score**: {score:.4f}\n")
-                                rf.write(f"- **Success Rate (@10% Error)**: {succ:.1f}%\n")
-                                rf.write(f"- **Mean Rotational Closure**: {clos:.1f}%\n")
-                                rf.write(f"- **Pre-Goal Retention**: {pre_ret:.1f}%\n")
-                                rf.write(f"- **Pre-Goal Drop Rate**: {pre_drop:.1f}%\n")
+                                rf.write(f"- **Target Precision Envelope**: 10.0% Relative Error Tolerance across 10° to 90° Envelope\n")
+                                rf.write(f"- **Overall Benchmark Score**: {score:.4f}\n")
+                                rf.write(f"- **Overall Success Rate (@10% Error)**: {succ:.1f}%\n")
+                                rf.write(f"- **Overall Rotational Closure**: {clos:.1f}%\n")
+                                rf.write(f"- **Overall Pre-Goal Retention**: {pre_ret:.1f}%\n\n")
+                                rf.write(f"### Stratified Angle Range Breakdown\n")
+                                rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: {metrics['r1_succ']*100:.1f}% Success | {metrics['r1_clos']*100:.1f}% Closure | {metrics['r1_ret']*100:.1f}% Retention\n")
+                                rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: {metrics['r2_succ']*100:.1f}% Success | {metrics['r2_clos']*100:.1f}% Closure | {metrics['r2_ret']*100:.1f}% Retention\n")
                                 rf.write(f"- **Last Updated**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                         except Exception as ce:
                             print(f"  [Champion Update Warning]: {ce}", flush=True)
                     promoted_str = "  *** [NEW BEST BENCHMARK MODEL PROMOTED] ***"
                     
-                print(f"  [Iter {it:05d} | EpsR {active_eps*100:.1f}%] Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Pre-Drop: {pre_drop:5.1f}% | Pre-Ret: {pre_ret:5.1f}% | Raw-Drop: {raw_drop:5.1f}% | Score: {score:.4f} ({t_eval:.1f}s){promoted_str}", flush=True)
+                print(f"  [Iter {it:05d} | Stratified 10-90°] R1(10-40°): {metrics['r1_succ']*100:4.1f}% succ, {metrics['r1_clos']*100:4.1f}% clos | R2(40-90°): {metrics['r2_succ']*100:4.1f}% succ, {metrics['r2_clos']*100:4.1f}% clos | Overall: {succ:4.1f}% succ, {clos:4.1f}% clos, {pre_ret:4.1f}% ret | Score: {score:.4f} ({t_eval:.1f}s){promoted_str}", flush=True)
                 
                 # Append to history log
                 with open(eval_log, "a") as f:

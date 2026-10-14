@@ -86,6 +86,7 @@ class RewardWeights:
     w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
     w6: float = 0.05    # Proportional contact reward: encourages multi-fingered contact points (n_c)
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
+    w_step_penalty: float = 0.04 # Step time cost: penalizes stalling / passive holding without making progress
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.25     # Target orientation error threshold as ratio of initial angle (e.g. 0.25 = 25%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -151,6 +152,7 @@ class PPOConfig:
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     w4: float = 40.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
+    w_step_penalty: float = 0.04     # Step time penalty to penalize stalling
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -551,23 +553,20 @@ class DeltoInHandManipulationEnv:
         # Step-level Rotational Closure ratio in [0.0, 1.0]
         step_closure = float(np.clip(1.0 - (d_theta / (self.initial_d_theta + 1e-6)), 0.0, 1.0))
         
-        # (a1) Convex Orientation Closure Reward:
-        # Eliminates the flat alive-bonus stalling trap! Scales super-linearly as object nears goal orientation:
-        # 0% closure -> +0.00, 40% closure -> +0.29, 70% closure -> +0.92, 100% closure -> +2.25
-        orientation_reward = w.w1 * float(step_closure ** 2 + 0.5 * (step_closure ** 4))
-        
-        # (a2) Accelerating Angular Progress Reward:
-        # Multiplier grows super-linearly from ~1x at start up to ~4.5x near goal orientation:
-        # User requested: "increase the reward by more rate as it gets closer to the desired orientation"
+        # (a1) Pure Angular Progress Reward with Super-Linear Goal Acceleration:
+        # Strictly proportional to active angular movement toward target orientation:
+        # angular_progress = (prev_d_theta - d_theta).
+        # When hand holds still (angular_progress == 0), reward is exactly 0.0!
+        # This completely eliminates the passive clamping / reward inversion trap!
+        # Multiplier accelerates from 1.0x up to 5.0x as closure approaches the target orientation.
         angular_progress = float(self.prev_d_theta - d_theta)
-        progress_accel = 1.0 + 2.0 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
+        progress_accel = 1.0 + 2.5 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
         progress_reward = w.w_progress * angular_progress * progress_accel
         
-        # (a3) Multi-Scale Exponential Precision Guidance Reward:
-        # Broad 0.45 rad capture funnel + steep 0.18 rad terminal lock-in accelerator:
-        precision_reward = w.w_precision * float(
-            0.4 * np.exp(-d_theta / 0.45) + 0.6 * np.exp(-d_theta / 0.18)
-        )
+        # (a2) Precision Alignment Guidance: Earned strictly on active progress when nearing goal threshold
+        precision_bonus = 0.0
+        if d_theta < 0.35 and angular_progress > 0:
+            precision_bonus = w.w_precision * float(np.exp(-d_theta / 0.18)) * angular_progress * 2.0
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -633,10 +632,11 @@ class DeltoInHandManipulationEnv:
         drop_penalty = w.w5 if is_dropped else 0.0
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         
+        step_cost = getattr(w, 'w_step_penalty', 0.04)
+        
         reward = (
-            orientation_reward
-            + progress_reward
-            + precision_reward
+            progress_reward
+            + precision_bonus
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
@@ -646,6 +646,7 @@ class DeltoInHandManipulationEnv:
             - drop_penalty
             + (w.w6 * float(n_c))
             - zero_contact_pen
+            - step_cost
         )
         
         # 6. Termination Flags
@@ -1250,6 +1251,7 @@ class PPOFineTuner:
                     w_action_rate=self.cfg.w_action_rate,
                     w4=self.cfg.w4,
                     w5=self.cfg.w5,
+                    w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.04),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -1924,6 +1926,7 @@ def parse_args():
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
     parser.add_argument("--w4", type=float, default=40.0, help="Terminal success bonus weight (default: 40.0)")
     parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
+    parser.add_argument("--w_step_penalty", type=float, default=0.04, help="Step time penalty to penalize stalling/passive holding (default: 0.04)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
@@ -2009,6 +2012,7 @@ def main():
         w_action_rate=args.w_action_rate,
         w4=args.w4,
         w5=args.w5,
+        w_step_penalty=args.w_step_penalty,
         save_freq=args.save_freq,
         render=args.render,
         show_actions=args.show_actions,

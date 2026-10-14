@@ -189,13 +189,14 @@ def run_training_stage(
     w_precision: float = 4.0,
     w4: float = 40.0,
     w5: float = 15.0,
+    w_step_penalty: float = 0.04,
     actor_lr: float = 1.6e-5,
     critic_lr: float = 8e-5,
     max_log_std: float = -2.0,
     entropy_coef: float = 0.0003,
     reset_log_std: bool = False,
     force_seed_checkpoint: bool = False,
-    eval_script: str = "in_hand_manipulation/evaluate_stage2.py"
+    eval_script: str = "in_hand_manipulation/evaluate_comprehensive.py"
 ) -> str:
     """Executes a training stage, prints telemetry every 500 iters, cleans up, and evaluates."""
     log(f"\n{'='*75}\nSTARTING {stage_name}: EpsR={epsilon_ratio*100:.1f}%, GoalAngle={max_goal_angle:.2f} rad, Iterations={iterations} (Warmup={warmup_iters})\n{'='*75}")
@@ -269,6 +270,7 @@ def run_training_stage(
             "--w_precision", str(w_precision),
             "--w4", str(w4),
             "--w5", str(w5),
+            "--w_step_penalty", str(w_step_penalty),
             "--epsilon_ratio", str(epsilon_ratio),
             "--min_epsilon_ratio", str(min_epsilon_ratio),
             "--max_goal_angle", str(max_goal_angle),
@@ -400,29 +402,30 @@ def main():
     # Base weights: Re-seeded from Iteration 1900 golden model (52.0% benchmark success at 10% error)
     # Boosted progress rewards (w_progress=12.0, w1=2.5, w_precision=6.0, w4=50.0) to aggressively incentivize finger gaiting rotation
     unified_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
-    golden_1900 = os.path.join(unified_dir, "stage2_iter1900_golden_52pct.pth")
+    champion_model = os.path.join(PROJECT_ROOT, "best_model", "best_model.pth")
     if not is_stage_fully_completed(unified_dir, 70000):
         current_model = run_training_stage(
             stage_name="Stage 2 Target-10% Precision Run (Option A: 70k Cap)",
             output_dir=unified_dir,
-            checkpoint_in=golden_1900,
+            checkpoint_in=champion_model,
             iterations=70000,
             epsilon_ratio=0.10,
             min_epsilon_ratio=0.10,
             max_goal_angle=1.57,
             warmup_iters=0,
             w1=2.5,
-            w_progress=12.0,
+            w_progress=14.0,
             w_precision=6.0,
-            w4=50.0,
+            w4=60.0,
             w5=15.0,
+            w_step_penalty=0.04,
             actor_lr=1.4e-5,
             critic_lr=7e-5,
             max_log_std=-2.0,
             entropy_coef=0.0003,
             reset_log_std=False,
             force_seed_checkpoint=True,
-            eval_script="in_hand_manipulation/evaluate_stage2.py"
+            eval_script="in_hand_manipulation/evaluate_comprehensive.py"
         )
     else:
         current_model = os.path.join(unified_dir, "ppo_best_actor.pth")

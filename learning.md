@@ -1215,8 +1215,40 @@ Option A eliminates this pathology by locking tolerance at the user's operationa
 ### 4. Background Evaluator & Stopping Criterion
 - **Asynchronous Evaluation Sidecar**: Runs across 4 parallel evaluation workers, evaluating milestone checkpoints every 100 iterations on **500 randomized episodes** across Cylinder, Cube, and Cuboid at $10\%$ error tolerance.
 - **Pre-Goal Retention Tracking**: Drops occurring *after* an initial goal has already been achieved (during continuous multi-goal resampling) do not count against retention for the stopping criterion.
-- **Autonomous Termination**: Training automatically saves the final golden model and terminates when either:
-  1. Background benchmark verifies $\text{Success} \ge 70.0\%$ and $\text{Retention} \ge 70.0\%$ at $\epsilon_{\text{ratio}} \le 0.10$.
-  2. Total iterations reach the cumulative 70,000 iteration ceiling.
+---
 
+## 36. Resolution of the Reward Inversion Trap & Phase 2 Recalibration
+
+### 1. Empirical Discovery: The Inverted Advantage Paradox
+Between Iteration 20,700 and Iteration 30,300 of the continuous run:
+- **Episode Return Almost Doubled**: from $\approx 345 \to 580$ points.
+- **Benchmark Success Rate Halved**: from $63.33\% \to 35.00\%$.
+- **Rotational Closure Collapsed**: from $76.01\% \to 48.20\%$.
+
+#### Root Cause Analysis:
+1. **Static Posture Exploitation**:
+   - The orientation reward formulation rewarded static closure ratio $\text{closure}^2$ on every time-step regardless of whether the hand was actively rotating the object.
+   - Siting motionless at $40\%$ closure over a 450-step episode accumulated $\approx +560$ points of effortless return.
+2. **Negative Expected Value for Active Gaiting**:
+   - Lifting a finger to gait across the object risked dropping it, which instantly truncated the episode and forfeited all remaining steps of positive return ($\approx -490$ points foregone return).
+   - The $+50.0$ terminal success bonus was mathematically dwarfed by the risk of losing passive survival points. Policy gradients inevitably optimized for passive holding.
+
+### 2. Workspace Standardization & Dedicated Champion Repository
+1. **`best_model/` Champion Repository**:
+   - Created `best_model/best_model.pth` (MD5: `eb5188bea9f3b0bd7164d9b53b7a2ea0`), permanently archiving the Iteration 20,700 champion model with verified metrics:
+     - **Overall Success (@10% Error)**: **$63.33\%$**
+     - **Rotational Closure**: **$76.01\%$**
+     - **Pre-Goal Retention**: **$88.33\%$**
+     - **Cylinder**: $70.0\%$ Success, $83.2\%$ Closure, $95.0\%$ Retention
+     - **Cube**: $60.0\%$ Success, $80.2\%$ Closure, $100.0\%$ Retention
+     - **Cuboid**: $60.0\%$ Success, $64.5\%$ Closure, $70.0\%$ Retention
+   - Whitelisted in `.gitignore` so weights are fully tracked in version control.
+2. **Purged Obsolete Scripts**:
+   - Cleaned 7 obsolete/redundant test scripts from `in_hand_manipulation/` (`evaluate_stage1/2/3.py`, `evaluate_ppo.py`, `evaluate_bc.py`, `run_overnight_precision_pipeline.py`, `evaluate_all_benchmarks.py`), leaving only active engines.
+
+### 3. Mathematical Reward Recalibration:
+- **Pure Angular Progress**: Replaced static posture reward with dynamic movement velocity $\Delta \theta = \theta_{\text{prev}} - \theta_{\text{cur}}$. Motionless holding yields exactly $0.0$ reward.
+- **Step Time Cost**: Injected $w_{\text{step\_penalty}} = 0.04$ per step, so stalling now incurs a negative return over time.
+- **Boosted Terminal Goal Bonus**: Raised $w_4 = 60.0$ so reaching the goal provides the dominant payoff.
+- **Initial Weights**: Re-seeded directly from `best_model/best_model.pth` ($63.3\%$ baseline) running toward the 70,000 global cumulative iteration cap.
 

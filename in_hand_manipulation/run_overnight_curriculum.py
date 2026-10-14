@@ -221,6 +221,7 @@ def run_training_stage(
         except Exception as e:
             log(f"  [Auto-Resume Warning] Could not parse existing progress.csv: {e}")
 
+    os.makedirs(output_dir, exist_ok=True)
     best_actor_dest = os.path.join(output_dir, "ppo_best_actor.pth")
     if start_iteration == 1:
         if force_seed_checkpoint and os.path.exists(checkpoint_in):

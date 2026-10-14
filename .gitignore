@@ -440,6 +440,7 @@ checkpoints/
 checkpoints_*/
 checkpoints*
 stage2*/
+fine_tune_training/
 metrics.jsonl
 *.jsonl
 progress.csv

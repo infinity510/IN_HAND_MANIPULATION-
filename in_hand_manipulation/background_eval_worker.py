@@ -282,6 +282,26 @@ def main():
                     best_score = score
                     best_iter = it
                     shutil.copy2(ckpt_file, best_output)
+                    # Automatically update global champion repository
+                    champion_dir = os.path.join(PROJECT_ROOT, "best_model")
+                    if os.path.exists(champion_dir):
+                        try:
+                            champion_path = os.path.join(champion_dir, "best_model.pth")
+                            shutil.copy2(ckpt_file, champion_path)
+                            readme_path = os.path.join(champion_dir, "README.md")
+                            with open(readme_path, "w") as rf:
+                                rf.write("# Best Champion Model (Stage 2 Large-Angle In-Hand Manipulation)\n\n")
+                                rf.write(f"- **Checkpoint File**: `best_model.pth`\n")
+                                rf.write(f"- **Source**: Iteration {it}\n")
+                                rf.write(f"- **Target Precision Envelope**: 10.0% Relative Error Tolerance, 90° Large-Angle Envelope (1.57 rad)\n")
+                                rf.write(f"- **Benchmark Score**: {score:.4f}\n")
+                                rf.write(f"- **Success Rate (@10% Error)**: {succ:.1f}%\n")
+                                rf.write(f"- **Mean Rotational Closure**: {clos:.1f}%\n")
+                                rf.write(f"- **Pre-Goal Retention**: {pre_ret:.1f}%\n")
+                                rf.write(f"- **Pre-Goal Drop Rate**: {pre_drop:.1f}%\n")
+                                rf.write(f"- **Last Updated**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                        except Exception as ce:
+                            print(f"  [Champion Update Warning]: {ce}", flush=True)
                     promoted_str = "  *** [NEW BEST BENCHMARK MODEL PROMOTED] ***"
                     
                 print(f"  [Iter {it:05d} | EpsR {active_eps*100:.1f}%] Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Pre-Drop: {pre_drop:5.1f}% | Pre-Ret: {pre_ret:5.1f}% | Raw-Drop: {raw_drop:5.1f}% | Score: {score:.4f} ({t_eval:.1f}s){promoted_str}", flush=True)

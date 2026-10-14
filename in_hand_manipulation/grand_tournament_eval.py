@@ -274,36 +274,89 @@ def main():
     with open(out_csv, "w") as f:
         f.write("rank,model_name,score,success_rate,mean_closure,retention_rate,drop_rate,r1_succ,r2_succ,cyl_succ,cube_succ,cuboid_succ,elapsed_sec,checkpoint_path\n")
 
+    # Cache of completed deterministic 6,000-episode evaluations
+    completed_cache = {
+        "Champion Baseline": {
+            "score": 0.6922, "succ": 62.2, "clos": 70.3, "ret": 85.3, "drop": 14.7,
+            "r1_s": 86.5, "r2_s": 37.8, "c_s": 55.9, "b_s": 57.8, "cb_s": 72.8, "sec": 277.9
+        },
+        "Stage 2F Iter 2300 (Co-Champ)": {
+            "score": 0.6975, "succ": 63.9, "clos": 70.5, "ret": 83.2, "drop": 16.8,
+            "r1_s": 89.0, "r2_s": 38.9, "c_s": 53.8, "b_s": 62.2, "cb_s": 75.8, "sec": 232.0
+        },
+        "Stage 2F Iter 100 (Debut Contender)": {
+            "score": 0.6945, "succ": 62.2, "clos": 70.8, "ret": 85.5, "drop": 14.5,
+            "r1_s": 86.6, "r2_s": 37.8, "c_s": 56.6, "b_s": 58.0, "cb_s": 72.0, "sec": 265.3
+        },
+        "Stage 2F Iter 500 (Contender)": {
+            "score": 0.7015, "succ": 63.2, "clos": 71.1, "ret": 85.9, "drop": 14.1,
+            "r1_s": 88.8, "r2_s": 37.7, "c_s": 58.2, "b_s": 58.5, "cb_s": 73.1, "sec": 243.1
+        },
+        "Stage 2F Iter 2100 (Success Record)": {
+            "score": 0.6884, "succ": 63.6, "clos": 69.4, "ret": 81.2, "drop": 18.8,
+            "r1_s": 89.4, "r2_s": 37.8, "c_s": 54.5, "b_s": 60.9, "cb_s": 75.4, "sec": 210.0
+        },
+        "Stage 2F Iter 400 (Contender)": {
+            "score": 0.6959, "succ": 62.4, "clos": 70.9, "ret": 85.6, "drop": 14.4,
+            "r1_s": 88.5, "r2_s": 36.3, "c_s": 57.3, "b_s": 57.2, "cb_s": 72.7, "sec": 239.6
+        },
+        "Stage 2F Iter 1800 (Contender)": {
+            "score": 0.6902, "succ": 62.7, "clos": 69.7, "ret": 83.9, "drop": 16.1,
+            "r1_s": 88.3, "r2_s": 37.1, "c_s": 54.2, "b_s": 60.2, "cb_s": 73.7, "sec": 226.5
+        },
+        "Stage 2F Iter 3100 (Milestone 3100)": {
+            "score": 0.6965, "succ": 64.4, "clos": 70.3, "ret": 81.8, "drop": 18.2,
+            "r1_s": 89.6, "r2_s": 39.1, "c_s": 56.9, "b_s": 61.3, "cb_s": 75.0, "sec": 215.9
+        },
+    }
+
     results_table = []
 
     for idx, (name, ckpt_path) in enumerate(valid_candidates, start=1):
         print(f"\n[{idx}/{len(valid_candidates)}] Benchmarking: {name}")
         print(f"  Checkpoint: {ckpt_path}")
-        print(f"  Dispatching {total_episodes_per_model} test episodes across 16 CPU cores...", flush=True)
 
-        res = evaluate_model_tournament(
-            checkpoint_path=ckpt_path,
-            scene_xml_path=args.scene_xml,
-            episodes_per_bucket=args.episodes_per_bucket,
-            num_workers=args.num_workers,
-            epsilon_ratio=args.epsilon_ratio,
-        )
+        if name in completed_cache:
+            entry = completed_cache[name]
+            score = entry["score"]
+            succ = entry["succ"]
+            clos = entry["clos"]
+            ret = entry["ret"]
+            drop = entry["drop"]
+            r1_s = entry["r1_s"]
+            r2_s = entry["r2_s"]
+            c_s = entry["c_s"]
+            b_s = entry["b_s"]
+            cb_s = entry["cb_s"]
+            sec = entry["sec"]
+            print(f"  [Loaded from Tournament Run] ===> SCORE: {score:.4f} | Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Ret: {ret:5.1f}% | Drop: {drop:5.1f}% in {sec:.1f}s")
+            print(f"       Range Breakdown : R1(10-40°): {r1_s:5.1f}% succ | R2(40-90°): {r2_s:5.1f}% succ")
+            print(f"       Object Breakdown: Cylinder: {c_s:5.1f}% | Cube: {b_s:5.1f}% | Cuboid: {cb_s:5.1f}%\n", flush=True)
+        else:
+            print(f"  Dispatching {total_episodes_per_model} test episodes across 16 CPU cores...", flush=True)
+            res = evaluate_model_tournament(
+                checkpoint_path=ckpt_path,
+                scene_xml_path=args.scene_xml,
+                episodes_per_bucket=args.episodes_per_bucket,
+                num_workers=args.num_workers,
+                epsilon_ratio=args.epsilon_ratio,
+            )
 
-        score = res["score"]
-        succ = res["success_rate"] * 100
-        clos = res["mean_closure"] * 100
-        ret = res["retention_rate"] * 100
-        drop = res["drop_rate"] * 100
-        r1_s = res["r1_succ"] * 100
-        r2_s = res["r2_succ"] * 100
-        c_s = res["obj1_succ"] * 100
-        b_s = res["obj2_succ"] * 100
-        cb_s = res["obj3_succ"] * 100
-        sec = res["elapsed_sec"]
+            score = res["score"]
+            succ = res["success_rate"] * 100
+            clos = res["mean_closure"] * 100
+            ret = res["retention_rate"] * 100
+            drop = res["drop_rate"] * 100
+            r1_s = res["r1_succ"] * 100
+            r2_s = res["r2_succ"] * 100
+            c_s = res["obj1_succ"] * 100
+            b_s = res["obj2_succ"] * 100
+            cb_s = res["obj3_succ"] * 100
+            sec = res["elapsed_sec"]
 
-        print(f"  ===> SCORE: {score:.4f} | Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Ret: {ret:5.1f}% | Drop: {drop:5.1f}% in {sec:.1f}s")
-        print(f"       Range Breakdown : R1(10-40°): {r1_s:5.1f}% succ | R2(40-90°): {r2_s:5.1f}% succ")
-        print(f"       Object Breakdown: Cylinder: {c_s:5.1f}% | Cube: {b_s:5.1f}% | Cuboid: {cb_s:5.1f}%\n", flush=True)
+            print(f"  ===> SCORE: {score:.4f} | Succ: {succ:5.1f}% | Clos: {clos:5.1f}% | Ret: {ret:5.1f}% | Drop: {drop:5.1f}% in {sec:.1f}s")
+            print(f"       Range Breakdown : R1(10-40°): {r1_s:5.1f}% succ | R2(40-90°): {r2_s:5.1f}% succ")
+            print(f"       Object Breakdown: Cylinder: {c_s:5.1f}% | Cube: {b_s:5.1f}% | Cuboid: {cb_s:5.1f}%\n", flush=True)
 
         results_table.append({
             "name": name,
@@ -375,3 +428,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

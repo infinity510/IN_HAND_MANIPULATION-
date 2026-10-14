@@ -564,10 +564,13 @@ class DeltoInHandManipulationEnv:
         # Step-level Rotational Closure ratio in [0.0, 1.0]
         step_closure = float(np.clip(1.0 - (d_theta / (self.initial_d_theta + 1e-6)), 0.0, 1.0))
         
-        # (a0) Convex Orientation Closure Reward (Super-Linear):
+        # (a0) Convex Orientation Closure Reward (Super-Linear with Precision Well):
         # Rewards higher rotational closure at super-linear rate: w1 * (closure^2 + 0.5 * closure^4)
-        # Guarantees continuous positive reinforcement for holding the object in the desired orientation.
+        # Plus an additional quadratic precision boost when entering sub-15% error (step_closure > 0.85)
+        # creating a steep funnel pulling the policy directly into the >=95% closure zone.
         closure_reward = w.w1 * (step_closure ** 2 + 0.5 * (step_closure ** 4))
+        if step_closure > 0.85:
+            closure_reward += 3.0 * float(((step_closure - 0.85) / 0.15) ** 2)
         
         # (a1) Pure Angular Progress Reward with Asymmetric Goal Acceleration:
         # Full accelerating progress on positive rotation toward target.
@@ -579,14 +582,15 @@ class DeltoInHandManipulationEnv:
         else:
             progress_reward = 0.25 * w.w_progress * angular_progress
         
-        # (a2) Precision Alignment Guidance: Earned strictly on active progress when nearing goal threshold
-        precision_bonus = 0.0
-        if angular_progress > 0.0:
-            rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
-            if rel_error < 0.15:
-                precision_bonus = w.w_precision * float(np.exp(-rel_error / 0.06)) * angular_progress * 4.0
-            elif d_theta < 0.35:
-                precision_bonus = w.w_precision * float(np.exp(-d_theta / 0.20)) * angular_progress * 2.0
+        # (a2) Precision Pocket Guidance Attractor (Inverse-Gaussian Well):
+        # Continuous magnetic guidance centered at the target orientation.
+        # Rises smoothly as relative error approaches the 5% tolerance standard (w.epsilon_ratio).
+        rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
+        if rel_error < 0.15:
+            error_ratio = rel_error / (w.epsilon_ratio + 1e-6)
+            precision_bonus = w.w_precision * float(np.exp(-0.5 * (error_ratio ** 2)))
+        else:
+            precision_bonus = 0.0
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -650,7 +654,9 @@ class DeltoInHandManipulationEnv:
             
         drop_penalty = w.w5 if is_dropped else 0.0
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
-        alive_reward = 0.0 if is_dropped else getattr(w, 'w_alive', 0.80)
+        # Survival reward scaled by rotational closure: prevents passive freezing in palm cradle
+        base_alive = getattr(w, 'w_alive', 0.80)
+        alive_reward = 0.0 if is_dropped else float(base_alive * (0.25 + 0.75 * step_closure))
         
         step_cost = getattr(w, 'w_step_penalty', 0.00)
         

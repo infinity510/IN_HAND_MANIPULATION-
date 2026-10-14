@@ -85,7 +85,8 @@ class RewardWeights:
     w4: float = 50.0    # Terminal success bonus: large positive reward upon reaching goal orientation
     w5: float = 80.0    # Catastrophic drop penalty: prevents suicide shortcut (dying early is strictly worse than living)
     w6: float = 0.00    # Proportional contact reward: 0.0 to prevent passive clamping trap
-    w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
+    w7: float = 0.20    # Zero contact penalty: relaxed penalty when contact points momentarily drop during gaiting
+    w_alive: float = 0.80 # Grasp survival / retention reward: continuous positive reward while object is safely in hand
     w_step_penalty: float = 0.00 # Flat step penalty: set to 0.00 to prevent suicidal agent trap
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.25     # Target orientation error threshold as ratio of initial angle (e.g. 0.25 = 25%)
@@ -153,6 +154,8 @@ class PPOConfig:
     w4: float = 50.0                 # Terminal success bonus weight
     w5: float = 80.0                 # Early reset / drop penalty weight (catastrophic)
     w6: float = 0.00                 # Proportional contact reward (0.0 to prevent passive clamping)
+    w7: float = 0.20                 # Zero contact penalty (relaxed)
+    w_alive: float = 0.80            # Grasp survival / retention reward
     w_step_penalty: float = 0.00     # Step time penalty (0.0 to prevent suicide shortcut)
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
@@ -554,15 +557,20 @@ class DeltoInHandManipulationEnv:
         # Step-level Rotational Closure ratio in [0.0, 1.0]
         step_closure = float(np.clip(1.0 - (d_theta / (self.initial_d_theta + 1e-6)), 0.0, 1.0))
         
-        # (a1) Pure Angular Progress Reward with Super-Linear Goal Acceleration:
-        # Strictly proportional to active angular movement toward target orientation:
-        # angular_progress = (prev_d_theta - d_theta).
-        # When hand holds still (angular_progress == 0), reward is exactly 0.0!
-        # This completely eliminates the passive clamping / reward inversion trap!
-        # Multiplier accelerates from 1.0x up to 5.0x as closure approaches the target orientation.
+        # (a0) Convex Orientation Closure Reward (Super-Linear):
+        # Rewards higher rotational closure at super-linear rate: w1 * (closure^2 + 0.5 * closure^4)
+        # Guarantees continuous positive reinforcement for holding the object in the desired orientation.
+        closure_reward = w.w1 * (step_closure ** 2 + 0.5 * (step_closure ** 4))
+        
+        # (a1) Pure Angular Progress Reward with Asymmetric Goal Acceleration:
+        # Full accelerating progress on positive rotation toward target.
+        # Damped penalty (0.25x) on negative slippage to avoid punishing necessary finger gaiting transitions.
         angular_progress = float(self.prev_d_theta - d_theta)
-        progress_accel = 1.0 + 2.5 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
-        progress_reward = w.w_progress * angular_progress * progress_accel
+        if angular_progress >= 0.0:
+            progress_accel = 1.0 + 2.5 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
+            progress_reward = w.w_progress * angular_progress * progress_accel
+        else:
+            progress_reward = 0.25 * w.w_progress * angular_progress
         
         # (a2) Precision Alignment Guidance: Earned strictly on active progress when nearing goal threshold
         precision_bonus = 0.0
@@ -585,16 +593,15 @@ class DeltoInHandManipulationEnv:
         joint_limit_penalty = 0.25 * float(np.sum(np.square(limit_prox / 0.08))) + 0.04 * float(np.sum(np.square(over_cmd)))
         
         # (b4) Flat-Shelf Support Regularization:
-        # Encourages fingers to maintain open, flat support surfaces beneath the object
-        # and penalizes excessive curling/tucking of distal knuckles into the palm.
+        # Penalizes extreme curling/tucking of distal knuckles into the palm while permitting normal grasping flexions.
         # Joint layout: [f1m1, f1m2, f1m3, f1m4, f2m1, f2m2, f2m3, f2m4, f3m1, f3m2, f3m3, f3m4]
         # Distal curls: (m3 + m4) for F1 (indices 2,3), F2 (indices 6,7), F3 (indices 10,11)
         f1_distal_curl = post_qpos[2] + post_qpos[3]
         f2_distal_curl = post_qpos[6] + post_qpos[7]
         f3_distal_curl = post_qpos[10] + post_qpos[11]
         distal_flexions = np.array([f1_distal_curl, f2_distal_curl, f3_distal_curl], dtype=np.float32)
-        hyperflex_excess = np.maximum(0.0, distal_flexions - 1.80)  # threshold: ~103° total curl
-        flat_shelf_penalty = 1.5 * float(np.sum(np.square(hyperflex_excess)))
+        hyperflex_excess = np.maximum(0.0, distal_flexions - 2.20)  # threshold: ~126° total curl (permits normal cylinder wrap)
+        flat_shelf_penalty = 0.30 * float(np.sum(np.square(hyperflex_excess)))
         
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
@@ -632,12 +639,15 @@ class DeltoInHandManipulationEnv:
             
         drop_penalty = w.w5 if is_dropped else 0.0
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
+        alive_reward = 0.0 if is_dropped else getattr(w, 'w_alive', 0.80)
         
-        step_cost = getattr(w, 'w_step_penalty', 0.04)
+        step_cost = getattr(w, 'w_step_penalty', 0.00)
         
         reward = (
-            progress_reward
+            closure_reward
+            + progress_reward
             + precision_bonus
+            + alive_reward
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
@@ -1253,7 +1263,9 @@ class PPOFineTuner:
                     w4=self.cfg.w4,
                     w5=self.cfg.w5,
                     w6=getattr(self.cfg, 'w6', 0.0),
-                    w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.08),
+                    w7=getattr(self.cfg, 'w7', 0.20),
+                    w_alive=getattr(self.cfg, 'w_alive', 0.80),
+                    w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.00),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -1936,6 +1948,8 @@ def parse_args():
     parser.add_argument("--w4", type=float, default=50.0, help="Terminal success bonus weight (default: 50.0)")
     parser.add_argument("--w5", type=float, default=80.0, help="Early reset / drop penalty weight (default: 80.0 catastrophic)")
     parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
+    parser.add_argument("--w7", type=float, default=0.20, help="Zero contact penalty weight (default: 0.20)")
+    parser.add_argument("--w_alive", type=float, default=0.80, help="Grasp retention / survival reward weight (default: 0.80)")
     parser.add_argument("--w_step_penalty", type=float, default=0.00, help="Step time penalty (default: 0.00 to prevent suicide shortcut)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
@@ -2023,6 +2037,8 @@ def main():
         w4=args.w4,
         w5=args.w5,
         w6=args.w6,
+        w7=args.w7,
+        w_alive=args.w_alive,
         w_step_penalty=args.w_step_penalty,
         save_freq=args.save_freq,
         render=args.render,

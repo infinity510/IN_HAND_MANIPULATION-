@@ -1142,6 +1142,41 @@ Between Iteration 700 and Iteration 1600 of Stage 2 training:
 3. **Golden Weight Re-Seeding**:
    - Re-seeded policy weights from the verified peak golden baseline (`stage2_unified/ppo_best_actor.pth`, $48.0\%\text{--}49.2\%$ benchmark score) to immediately resume training from an aggressive, high-closure state.
 
+---
+
+## 34. Definitive 10% Tolerance Benchmark Results: Best Model vs. Latest Model
+
+### 1. Benchmark Protocol
+To evaluate the user's stopping criterion and true alignment precision under the $90^\circ$ rotation envelope, a comprehensive benchmark was executed across **300 test episodes** (100 Cylinder, 100 Cube, 100 Cuboid) at **$10.0\%$ relative error tolerance** ($\text{error} \le 0.10 \times \theta_0$, requiring sub-$6^\circ$ precision on nominal $60^\circ$ goals).
+
+### 2. Comparative Results Matrix (300 Test Episodes Each):
+
+| Checkpoint | Success @ 10% Tol | Pre-Goal Retention | Rotational Closure | EMI Score | Mean Angular Error | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Best Model (`ppo_best_actor.pth` / Iter 1900)** | **$52.00\%$** | **$79.33\%$** | **$62.14\%$** | **$0.4930$** | **$49.1^\circ$** | **Project Golden Peak** |
+| **Latest Model (`ppo_latest_actor.pth` / Iter 19k+)** | $27.00\%$ | **$84.33\%$** | $39.10\%$ | $0.3298$ | $63.2^\circ$ | High-Retention Clamping |
+| *Stage 2B Baseline (`stage2b_golden.pth`)* | $40.00\%$ | $66.00\%$ | $52.00\%$ | $0.3430$ | $56.8^\circ$ | Prior Golden |
+| *Stage 2A Baseline (`stage2a_golden.pth`)* | $35.33\%$ | $66.00\%$ | $46.70\%$ | $0.3080$ | $58.7^\circ$ | Prior Stage |
+| *Stage 1 Baseline (`stage1_best_model.pth`)* | $32.33\%$ | $57.00\%$ | $42.60\%$ | $0.2430$ | $69.5^\circ$ | Precision Baseline |
+
+### 3. Per-Object Breakdown for Best Model (Iter 1900, 100 Episodes Each):
+
+| Object Geometry | Success Rate (@10% Tol) | Pre-Goal Retention Rate | Rotational Closure | EMI Score | Mean Angular Error |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Cuboid** | **$65.0\%$** | **$90.0\%$** | **$74.6\%$** | **$0.6710$** | **$36.2^\circ$** |
+| **Cube** | **$48.0\%$** | **$87.0\%$** | **$63.9\%$** | **$0.5561$** | **$39.9^\circ$** |
+| **Cylinder** | **$43.0\%$** | **$61.0\%$** | **$48.0\%$** | **$0.2926$** | **$71.1^\circ$** |
+
+### 4. Key Empirical Insights
+1. **Historic Peak Performance**:
+   - The Best Model (Iteration 1900) achieves **$52.0\%$ success at $10\%$ tolerance**, marking a $+12.0\%$ improvement over the Stage 2B golden model ($40.0\%$).
+   - Cylinder success jumped from $28.0\% \to \mathbf{43.0\%}$ ($+15\%$ gain), and Cube success climbed from $36.0\% \to \mathbf{48.0\%}$ ($+12\%$ gain).
+   - Cuboid mastery is virtually locked in with **$65.0\%$ success, $90.0\%$ retention, and $74.6\%$ closure**.
+2. **Trade-off at Extreme Sub-2.5° Tolerance**:
+   - The 19k checkpoint, trained under prolonged $5\%$ extreme tolerance, achieves superior retention ($84.33\%$, Cube $94\%$), but its rotational closure drops ($39.1\%$) due to the risk of drop penalties during aggressive gaiting.
+   - Iteration 1900 represents the optimal sweet spot between active gaiting reorientation ($62.1\%$ closure) and high retention ($79.3\%$).
+
+
 
 
 

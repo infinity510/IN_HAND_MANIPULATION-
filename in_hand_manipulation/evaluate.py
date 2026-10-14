@@ -111,6 +111,7 @@ def _eval_single_task(task_args):
     theta_rad = float(_w_env.initial_d_theta)
     quad_steps = int(250 + 200 * theta_rad + 150.0 * (theta_rad**2))
     _w_env.current_max_steps = min(800, quad_steps)
+    _w_env.set_epsilon_ratio(_w_epsilon_ratio)
     _w_env.set_epsilon(_w_epsilon_ratio * theta_rad)
 
     step = 0
@@ -240,6 +241,7 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                     theta_rad = float(env.initial_d_theta)
                     quad_steps = int(250 + 200 * theta_rad + 150.0 * (theta_rad**2))
                     env.current_max_steps = min(800, quad_steps)
+                    env.set_epsilon_ratio(epsilon_ratio)
                     env.set_epsilon(epsilon_ratio * theta_rad)
 
                     # Reference axis: strictly the direction of the top surface of the object facing up (+Z in body frame)

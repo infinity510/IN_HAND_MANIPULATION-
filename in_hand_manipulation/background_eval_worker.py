@@ -81,6 +81,7 @@ def _eval_single_episode(task_tuple):
     theta_rad = float(_worker_env.initial_d_theta)
     quad_steps = int(250 + 200 * theta_rad + 150.0 * (theta_rad ** 2))
     _worker_env.current_max_steps = min(800, quad_steps)
+    _worker_env.set_epsilon_ratio(_worker_epsilon_ratio)
     _worker_env.set_epsilon(_worker_epsilon_ratio * theta_rad)
     
     step = 0

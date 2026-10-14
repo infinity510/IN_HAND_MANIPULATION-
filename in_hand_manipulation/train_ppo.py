@@ -285,10 +285,13 @@ class DeltoInHandManipulationEnv:
     def set_epsilon(self, epsilon: float):
         """Updates goal orientation tolerance epsilon in radians."""
         self.reward_weights.epsilon = float(epsilon)
+        self.current_epsilon = float(epsilon)
 
     def set_epsilon_ratio(self, ratio: float):
         """Updates goal orientation tolerance ratio (e.g. 0.05 = 5%)."""
         self.reward_weights.epsilon_ratio = float(ratio)
+        if hasattr(self, "initial_d_theta") and self.initial_d_theta is not None:
+            self.current_epsilon = max(self.reward_weights.min_abs_epsilon, float(ratio) * self.initial_d_theta)
 
     def _sample_target_quat(self) -> np.ndarray:
         """

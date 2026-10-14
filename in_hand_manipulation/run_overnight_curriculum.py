@@ -189,7 +189,8 @@ def run_training_stage(
     w_precision: float = 4.0,
     w4: float = 40.0,
     w5: float = 15.0,
-    w_step_penalty: float = 0.04,
+    w6: float = 0.00,
+    w_step_penalty: float = 0.08,
     actor_lr: float = 1.6e-5,
     critic_lr: float = 8e-5,
     max_log_std: float = -2.0,
@@ -270,6 +271,7 @@ def run_training_stage(
             "--w_precision", str(w_precision),
             "--w4", str(w4),
             "--w5", str(w5),
+            "--w6", str(w6),
             "--w_step_penalty", str(w_step_penalty),
             "--epsilon_ratio", str(epsilon_ratio),
             "--min_epsilon_ratio", str(min_epsilon_ratio),
@@ -386,43 +388,91 @@ def main():
     # =========================================================================
     log("\n" + "#"*75 + "\nPROCEEDING TO STAGE 2: 90° LARGE-ANGLE GAITING\n" + "#"*75)
 
-    # Fine-Tune Training Master Run in fine_tune_training/
-    # Target: Consistently 70%-80% accuracy at <= 10% error tolerance across all objects
-    # Evaluation Strategy: Stratified Range 1 (10°-40°) and Range 2 (40°-90°) across Cylinder, Cube, Cuboid
-    # Base weights: Re-seeded directly from best_model/best_model.pth champion baseline
-    # Warmup: First 400 iterations critic-only calibration, then full joint PPO up to 70k cap
+    # Progressive Multi-Stage Annealing Curriculum:
+    # Eliminates passive clamping with w_step_penalty=0.08 and w6=0.00.
+    # Stage 2C: 18% Tolerance (2,500 iters) -> Smooth transition from 20% baseline
+    # Stage 2D: 15% Tolerance (3,500 iters) -> Intermediate precision consolidation
+    # Stage 2E: 12% Tolerance (4,000 iters) -> High-precision gaiting
+    # Stage 2F: 10% Tolerance (up to 70k cap) -> Final Target precision lock-in
     fine_tune_dir = os.path.join(PROJECT_ROOT, "fine_tune_training")
     champion_model = os.path.join(PROJECT_ROOT, "best_model", "best_model.pth")
     if not os.path.exists(champion_model):
         raise FileNotFoundError(f"Champion baseline model not found at {champion_model}")
-    log(f"Proceeding to Fine-Tune Training in {fine_tune_dir} using champion baseline: {champion_model}")
+    log(f"Proceeding to Progressive Annealing Curriculum using champion baseline: {champion_model}")
 
-    if not is_stage_fully_completed(fine_tune_dir, 70000):
-        current_model = run_training_stage(
-            stage_name="Fine-Tune Training (Stratified 2-Range Protocol)",
-            output_dir=fine_tune_dir,
-            checkpoint_in=champion_model,
-            iterations=70000,
-            epsilon_ratio=0.10,
-            min_epsilon_ratio=0.10,
-            max_goal_angle=1.57,
-            warmup_iters=100,
-            w1=2.5,
-            w_progress=14.0,
-            w_precision=6.0,
-            w4=60.0,
-            w5=15.0,
-            w_step_penalty=0.04,
-            actor_lr=1.4e-5,
-            critic_lr=7e-5,
-            max_log_std=-2.0,
-            entropy_coef=0.0003,
-            reset_log_std=False,
-            force_seed_checkpoint=True,
-            eval_script="in_hand_manipulation/evaluate.py"
-        )
-    else:
-        current_model = os.path.join(fine_tune_dir, "ppo_best_actor.pth")
+    stages = [
+        {
+            "name": "Stage 2C (18% Tolerance Adaptation)",
+            "sub": "stage2c_eps18",
+            "eps": 0.18,
+            "iters": 2500,
+            "warmup": 50,
+            "w4": 45.0,
+        },
+        {
+            "name": "Stage 2D (15% Tolerance Consolidation)",
+            "sub": "stage2d_eps15",
+            "eps": 0.15,
+            "iters": 3500,
+            "warmup": 50,
+            "w4": 50.0,
+        },
+        {
+            "name": "Stage 2E (12% Tolerance High Precision)",
+            "sub": "stage2e_eps12",
+            "eps": 0.12,
+            "iters": 4000,
+            "warmup": 50,
+            "w4": 55.0,
+        },
+        {
+            "name": "Stage 2F (10% Tolerance Target Lock-in)",
+            "sub": "stage2f_eps10",
+            "eps": 0.10,
+            "iters": 70000,
+            "warmup": 50,
+            "w4": 60.0,
+        },
+    ]
+
+    current_model = champion_model
+    for stg in stages:
+        s_name = stg["name"]
+        s_dir = os.path.join(fine_tune_dir, stg["sub"])
+        s_eps = stg["eps"]
+        s_iters = stg["iters"]
+        s_warmup = stg["warmup"]
+        s_w4 = stg["w4"]
+
+        log(f"\n{'#'*75}\nSTARTING {s_name}: Tolerance={s_eps*100:.1f}%, Iterations={s_iters}\n{'#'*75}")
+        if not is_stage_fully_completed(s_dir, s_iters):
+            current_model = run_training_stage(
+                stage_name=s_name,
+                output_dir=s_dir,
+                checkpoint_in=current_model,
+                iterations=s_iters,
+                epsilon_ratio=s_eps,
+                min_epsilon_ratio=s_eps,
+                max_goal_angle=1.57,
+                warmup_iters=s_warmup,
+                w1=2.5,
+                w_progress=14.0,
+                w_precision=6.0,
+                w4=s_w4,
+                w5=15.0,
+                w6=0.00,
+                w_step_penalty=0.08,
+                actor_lr=1.4e-5,
+                critic_lr=7e-5,
+                max_log_std=-2.0,
+                entropy_coef=0.0003,
+                reset_log_std=False,
+                force_seed_checkpoint=True,
+                eval_script="in_hand_manipulation/evaluate.py"
+            )
+        else:
+            current_model = os.path.join(s_dir, "ppo_best_actor.pth")
+            log(f"  {s_name} already completed. Continuing with model: {current_model}")
 
     # Grand Final Verification Benchmark using canonical evaluate.py
     # (100 episodes Range 1 [10°-40°] + 100 episodes Range 2 [40°-90°] per object = 600 total episodes)

@@ -84,9 +84,9 @@ class RewardWeights:
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
     w4: float = 40.0    # Terminal success bonus: large positive reward upon reaching goal orientation
     w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
-    w6: float = 0.05    # Proportional contact reward: encourages multi-fingered contact points (n_c)
+    w6: float = 0.00    # Proportional contact reward: set to 0.0 to prevent passive clamping trap
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
-    w_step_penalty: float = 0.04 # Step time cost: penalizes stalling / passive holding without making progress
+    w_step_penalty: float = 0.08 # Step time cost: penalizes stalling / passive holding without making progress
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.25     # Target orientation error threshold as ratio of initial angle (e.g. 0.25 = 25%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -152,7 +152,8 @@ class PPOConfig:
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
     w4: float = 40.0                 # Terminal success bonus weight
     w5: float = 15.0                 # Early reset / drop penalty weight
-    w_step_penalty: float = 0.04     # Step time penalty to penalize stalling
+    w6: float = 0.00                 # Proportional contact reward (0.0 to prevent passive clamping)
+    w_step_penalty: float = 0.08     # Step time penalty to penalize stalling
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -1251,7 +1252,8 @@ class PPOFineTuner:
                     w_action_rate=self.cfg.w_action_rate,
                     w4=self.cfg.w4,
                     w5=self.cfg.w5,
-                    w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.04),
+                    w6=getattr(self.cfg, 'w6', 0.0),
+                    w_step_penalty=getattr(self.cfg, 'w_step_penalty', 0.08),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -1933,7 +1935,8 @@ def parse_args():
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
     parser.add_argument("--w4", type=float, default=40.0, help="Terminal success bonus weight (default: 40.0)")
     parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
-    parser.add_argument("--w_step_penalty", type=float, default=0.04, help="Step time penalty to penalize stalling/passive holding (default: 0.04)")
+    parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
+    parser.add_argument("--w_step_penalty", type=float, default=0.08, help="Step time penalty to penalize stalling/passive holding (default: 0.08)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
@@ -2019,6 +2022,7 @@ def main():
         w_action_rate=args.w_action_rate,
         w4=args.w4,
         w5=args.w5,
+        w6=args.w6,
         w_step_penalty=args.w_step_penalty,
         save_freq=args.save_freq,
         render=args.render,

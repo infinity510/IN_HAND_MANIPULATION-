@@ -76,20 +76,20 @@ class RewardWeights:
           - w2*||a_t||^2 - w_action_rate*||da_t||^2 - w3*||qdot_t||^2
           + w4*I(d_theta < epsilon) - w5*I(dropped) + w6*n_c - w7*I(n_c == 0) + w_alive
     """
-    w1: float = 1.6     # Convex orientation closure weight: rewards higher closure at super-linear rate
-    w_progress: float = 8.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
-    w_precision: float = 5.0 # Multi-scale exponential precision guidance reward weight (boosted for 5% tolerance)
+    w1: float = 2.5     # Convex orientation closure weight: rewards higher closure at super-linear rate
+    w_progress: float = 14.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
+    w_precision: float = 6.0 # Multi-scale exponential precision guidance reward weight
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
-    w_action_rate: float = 0.003 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2 (increased to smooth gaiting)
+    w_action_rate: float = 0.002 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
-    w4: float = 65.0    # Terminal success bonus: large positive reward upon reaching goal orientation (boosted for 5% tolerance)
-    w5: float = 120.0   # Catastrophic drop penalty: increased to 120.0 to strictly suppress drops
+    w4: float = 50.0    # Terminal success bonus: large positive reward upon reaching goal orientation
+    w5: float = 80.0    # Catastrophic drop penalty: prevents suicide shortcut
     w6: float = 0.00    # Proportional contact reward: 0.0 to prevent passive clamping trap
-    w7: float = 0.30    # Zero contact penalty: penalizes losing contact with all fingers simultaneously
-    w_alive: float = 1.20 # Grasp survival / retention reward: continuous positive reward while object is safely in hand
+    w7: float = 0.20    # Zero contact penalty: relaxed penalty when contact points momentarily drop during gaiting
+    w_alive: float = 0.80 # Grasp survival / retention reward: continuous positive reward while object is safely in hand
     w_step_penalty: float = 0.00 # Flat step penalty: set to 0.00 to prevent suicidal agent trap
-    epsilon: float = 0.15           # Fallback absolute epsilon in radians (~8.6 degrees)
-    epsilon_ratio: float = 0.05     # Target orientation error threshold as ratio of initial angle (5.0% error)
+    epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
+    epsilon_ratio: float = 0.20     # Target orientation error threshold as ratio of initial angle (e.g. 0.20 = 20%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
     drop_threshold: float = 0.20   # Distance threshold from palm center in meters
     min_height_threshold: float = 0.02 # Object height floor: true drop below gripper palm level
@@ -564,32 +564,29 @@ class DeltoInHandManipulationEnv:
         # Step-level Rotational Closure ratio in [0.0, 1.0]
         step_closure = float(np.clip(1.0 - (d_theta / (self.initial_d_theta + 1e-6)), 0.0, 1.0))
         
-        # (a0) Convex Orientation Closure Reward (Super-Linear with higher-order precision pull):
-        # Rewards higher rotational closure at super-linear rate: w1 * (closure^2 + 1.0*closure^4 + 0.5*closure^6)
-        # Decisively pulls the policy into the final 95%+ closure pocket (sub-5% relative error)
-        closure_reward = w.w1 * (step_closure ** 2 + 1.0 * (step_closure ** 4) + 0.5 * (step_closure ** 6))
+        # (a0) Convex Orientation Closure Reward (Super-Linear):
+        # Rewards higher rotational closure at super-linear rate: w1 * (closure^2 + 0.5 * closure^4)
+        # Guarantees continuous positive reinforcement for holding the object in the desired orientation.
+        closure_reward = w.w1 * (step_closure ** 2 + 0.5 * (step_closure ** 4))
         
         # (a1) Pure Angular Progress Reward with Asymmetric Goal Acceleration:
         # Full accelerating progress on positive rotation toward target.
         # Damped penalty (0.25x) on negative slippage to avoid punishing necessary finger gaiting transitions.
         angular_progress = float(self.prev_d_theta - d_theta)
         if angular_progress >= 0.0:
-            progress_accel = 1.0 + 2.5 * float(step_closure ** 2) + 2.5 * float(np.exp(-d_theta / 0.35))
+            progress_accel = 1.0 + 2.5 * float(step_closure ** 2) + 2.0 * float(np.exp(-d_theta / 0.35))
             progress_reward = w.w_progress * angular_progress * progress_accel
         else:
             progress_reward = 0.25 * w.w_progress * angular_progress
         
-        # (a2) Precision Alignment Guidance: Focused exponential attractor for sub-5% error window
-        # Provides high-resolution magnetic gradient when entering the final 12% relative error zone
-        rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
-        if rel_error < 0.12:
-            precision_bonus = w.w_precision * float(np.exp(-rel_error / 0.04))
-            if angular_progress > 0.0:
-                precision_bonus += 3.0 * w.w_precision * float(np.exp(-rel_error / 0.04)) * angular_progress
-        elif d_theta < 0.35 and angular_progress > 0:
-            precision_bonus = 0.5 * w.w_precision * float(np.exp(-d_theta / 0.20)) * angular_progress * 2.0
-        else:
-            precision_bonus = 0.0
+        # (a2) Precision Alignment Guidance: Earned strictly on active progress when nearing goal threshold
+        precision_bonus = 0.0
+        if angular_progress > 0.0:
+            rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
+            if rel_error < 0.15:
+                precision_bonus = w.w_precision * float(np.exp(-rel_error / 0.06)) * angular_progress * 4.0
+            elif d_theta < 0.35:
+                precision_bonus = w.w_precision * float(np.exp(-d_theta / 0.20)) * angular_progress * 2.0
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -620,18 +617,8 @@ class DeltoInHandManipulationEnv:
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
         
-        # (d) Distance from palm center & Drop Reduction Stability Potentials
+        # (d) Distance from palm center
         dist_to_palm = float(np.linalg.norm(obj_pos - self.palm_position))
-        
-        # (d1) Palm Centering & Elevation Stability Bonus:
-        # Actively rewards keeping the object centered in the palm cradle to prevent slipping off during finger gaiting
-        dist_xy = float(np.linalg.norm(obj_pos[:2] - self.palm_position[:2]))
-        palm_centering_bonus = 0.35 * float(np.exp(-dist_xy / 0.035))
-        
-        # Height envelope protection: penalize if object sinks dangerously close to the drop floor
-        height_safety_penalty = 0.0
-        if obj_pos[2] < 0.035:
-            height_safety_penalty = 1.5 * float(((0.035 - obj_pos[2]) / 0.015) ** 2)
         
         # (e) Contact points
         n_c = self.count_contacts()
@@ -643,7 +630,7 @@ class DeltoInHandManipulationEnv:
         term_success_bonus = 0.0
         if is_success_this_step:
             self.episode_successes += 1
-            term_success_bonus = w.w4  # Success bonus (+65.0)
+            term_success_bonus = w.w4  # Success bonus (+50.0)
             # Continuous Goal Resampling (OpenAI Dactyl standard):
             # When target orientation is reached, immediately sample a new target orientation
             # so the agent can score multiple successive goals per episode without being penalized by early termination!
@@ -663,7 +650,7 @@ class DeltoInHandManipulationEnv:
             
         drop_penalty = w.w5 if is_dropped else 0.0
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
-        alive_reward = 0.0 if is_dropped else getattr(w, 'w_alive', 1.20)
+        alive_reward = 0.0 if is_dropped else getattr(w, 'w_alive', 0.80)
         
         step_cost = getattr(w, 'w_step_penalty', 0.00)
         
@@ -671,8 +658,6 @@ class DeltoInHandManipulationEnv:
             closure_reward
             + progress_reward
             + precision_bonus
-            + palm_centering_bonus
-            - height_safety_penalty
             + alive_reward
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
@@ -1956,26 +1941,26 @@ def parse_args():
     parser.add_argument("--reset_log_std", action="store_true", help="Reset loaded log_std to initial_log_std")
     parser.add_argument("--max_steps", type=int, default=400, help="Max episode horizon in steps (default: 400 steps = 8.0 seconds at 50Hz)")
     parser.add_argument("--num_envs", type=int, default=8, help="Number of parallel MuJoCo environments (default: 8 for 10x-15x speedup; set to 1 for render mode)")
-    parser.add_argument("--epsilon", type=float, default=0.15, help="Fallback orientation success threshold in radians (~8.6 deg)")
-    parser.add_argument("--epsilon_ratio", type=float, default=0.05, help="Target orientation error threshold as ratio of initial angle (default: 0.05 = 5%%)")
+    parser.add_argument("--epsilon", type=float, default=0.35, help="Fallback orientation success threshold in radians (~20.0 deg)")
+    parser.add_argument("--epsilon_ratio", type=float, default=0.20, help="Target orientation error threshold as ratio of initial angle (default: 0.20 = 20%%)")
     parser.add_argument("--min_epsilon_ratio", type=float, default=0.05, help="Minimum epsilon ratio floor (default: 0.05 = 5%%)")
-    parser.add_argument("--max_epsilon_ratio", type=float, default=0.05, help="Maximum epsilon ratio ceiling (default: 0.05 = 5%%)")
+    parser.add_argument("--max_epsilon_ratio", type=float, default=0.20, help="Maximum epsilon ratio ceiling (default: 0.20 = 20%%)")
     parser.add_argument("--min_epsilon", type=float, default=0.015, help="Minimum absolute epsilon threshold in radians (~0.86 deg)")
-    parser.add_argument("--max_epsilon", type=float, default=0.15, help="Maximum epsilon threshold in radians")
+    parser.add_argument("--max_epsilon", type=float, default=0.35, help="Maximum epsilon threshold in radians")
     parser.add_argument("--max_goal_angle", type=float, default=1.5708, help="Maximum target orientation angle in radians (default: 1.5708 rad = 90 deg)")
     parser.add_argument("--min_goal_angle", type=float, default=0.17453, help="Minimum goal rotation angle floor in radians (default: 0.17453 rad = 10 deg)")
     parser.add_argument("--target_max_goal_angle", type=float, default=1.5708, help="Target maximum goal angle in radians (default: 1.5708 rad = 90 deg)")
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive curriculum")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive curriculum on goal angle")
-    parser.add_argument("--w1", type=float, default=1.6, help="Convex orientation closure reward weight (default: 1.6)")
-    parser.add_argument("--w_progress", type=float, default=8.0, help="Accelerating angular progress reward weight (default: 8.0)")
-    parser.add_argument("--w_precision", type=float, default=5.0, help="Multi-scale exponential precision guidance reward weight (default: 5.0)")
-    parser.add_argument("--w_action_rate", type=float, default=0.003, help="Action rate smoothing penalty weight (default: 0.003)")
-    parser.add_argument("--w4", type=float, default=65.0, help="Terminal success bonus weight (default: 65.0)")
-    parser.add_argument("--w5", type=float, default=120.0, help="Early reset / drop penalty weight (default: 120.0 catastrophic)")
+    parser.add_argument("--w1", type=float, default=2.5, help="Convex orientation closure reward weight (default: 2.5)")
+    parser.add_argument("--w_progress", type=float, default=14.0, help="Accelerating angular progress reward weight (default: 14.0)")
+    parser.add_argument("--w_precision", type=float, default=6.0, help="Multi-scale exponential precision guidance reward weight (default: 6.0)")
+    parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
+    parser.add_argument("--w4", type=float, default=50.0, help="Terminal success bonus weight (default: 50.0)")
+    parser.add_argument("--w5", type=float, default=80.0, help="Early reset / drop penalty weight (default: 80.0)")
     parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
-    parser.add_argument("--w7", type=float, default=0.30, help="Zero contact penalty weight (default: 0.30)")
-    parser.add_argument("--w_alive", type=float, default=1.20, help="Grasp retention / survival reward weight (default: 1.20)")
+    parser.add_argument("--w7", type=float, default=0.20, help="Zero contact penalty weight (default: 0.20)")
+    parser.add_argument("--w_alive", type=float, default=0.80, help="Grasp retention / survival reward weight (default: 0.80)")
     parser.add_argument("--w_step_penalty", type=float, default=0.00, help="Step time penalty (default: 0.00)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")

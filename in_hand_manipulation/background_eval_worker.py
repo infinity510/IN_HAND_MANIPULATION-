@@ -210,6 +210,7 @@ def main():
     parser.add_argument("--epsilon_ratio", type=float, default=0.20, help="Target relative error threshold")
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")
+    parser.add_argument("--update_global_best", action="store_true", help="Also promote to global best_model/best_model.pth")
     args = parser.parse_args()
     
     watch_dir = os.path.abspath(args.watch_dir)
@@ -346,7 +347,7 @@ def main():
                             best_iter = it
                             shutil.copy2(ckpt_file, best_output)
                             champion_dir = os.path.join(PROJECT_ROOT, "best_model")
-                            if os.path.exists(champion_dir):
+                            if args.update_global_best and os.path.exists(champion_dir):
                                 try:
                                     champion_path = os.path.join(champion_dir, "best_model.pth")
                                     shutil.copy2(ckpt_file, champion_path)
@@ -379,7 +380,7 @@ def main():
                     shutil.copy2(ckpt_file, best_output)
                     # Automatically update global champion repository
                     champion_dir = os.path.join(PROJECT_ROOT, "best_model")
-                    if os.path.exists(champion_dir):
+                    if args.update_global_best and os.path.exists(champion_dir):
                         try:
                             champion_path = os.path.join(champion_dir, "best_model.pth")
                             shutil.copy2(ckpt_file, champion_path)

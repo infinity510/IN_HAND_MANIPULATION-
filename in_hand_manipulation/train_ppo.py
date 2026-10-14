@@ -82,11 +82,11 @@ class RewardWeights:
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
     w_action_rate: float = 0.002 # Action rate penalty weight: penalizes high-frequency finger jitter ||a_t - a_{t-1}||^2
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
-    w4: float = 40.0    # Terminal success bonus: large positive reward upon reaching goal orientation
-    w5: float = 15.0    # Early reset / drop penalty: absorbing state penalty when object dropped
-    w6: float = 0.00    # Proportional contact reward: set to 0.0 to prevent passive clamping trap
+    w4: float = 50.0    # Terminal success bonus: large positive reward upon reaching goal orientation
+    w5: float = 80.0    # Catastrophic drop penalty: prevents suicide shortcut (dying early is strictly worse than living)
+    w6: float = 0.00    # Proportional contact reward: 0.0 to prevent passive clamping trap
     w7: float = 1.0     # Zero contact penalty: penalty triggered when contact points drop to 0
-    w_step_penalty: float = 0.08 # Step time cost: penalizes stalling / passive holding without making progress
+    w_step_penalty: float = 0.00 # Flat step penalty: set to 0.00 to prevent suicidal agent trap
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.25     # Target orientation error threshold as ratio of initial angle (e.g. 0.25 = 25%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -150,10 +150,10 @@ class PPOConfig:
     w_progress: float = 8.0          # Accelerating angular progress reward weight
     w_precision: float = 4.0         # Multi-scale exponential precision guidance reward weight
     w_action_rate: float = 0.002     # Action rate smoothing penalty weight
-    w4: float = 40.0                 # Terminal success bonus weight
-    w5: float = 15.0                 # Early reset / drop penalty weight
+    w4: float = 50.0                 # Terminal success bonus weight
+    w5: float = 80.0                 # Early reset / drop penalty weight (catastrophic)
     w6: float = 0.00                 # Proportional contact reward (0.0 to prevent passive clamping)
-    w_step_penalty: float = 0.08     # Step time penalty to penalize stalling
+    w_step_penalty: float = 0.00     # Step time penalty (0.0 to prevent suicide shortcut)
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -1933,10 +1933,10 @@ def parse_args():
     parser.add_argument("--w_progress", type=float, default=8.0, help="Accelerating angular progress reward weight (default: 8.0)")
     parser.add_argument("--w_precision", type=float, default=4.0, help="Multi-scale exponential precision guidance reward weight (default: 4.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.002, help="Action rate smoothing penalty weight (default: 0.002)")
-    parser.add_argument("--w4", type=float, default=40.0, help="Terminal success bonus weight (default: 40.0)")
-    parser.add_argument("--w5", type=float, default=15.0, help="Early reset / drop penalty weight (default: 15.0)")
+    parser.add_argument("--w4", type=float, default=50.0, help="Terminal success bonus weight (default: 50.0)")
+    parser.add_argument("--w5", type=float, default=80.0, help="Early reset / drop penalty weight (default: 80.0 catastrophic)")
     parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
-    parser.add_argument("--w_step_penalty", type=float, default=0.08, help="Step time penalty to penalize stalling/passive holding (default: 0.08)")
+    parser.add_argument("--w_step_penalty", type=float, default=0.00, help="Step time penalty (default: 0.00 to prevent suicide shortcut)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")

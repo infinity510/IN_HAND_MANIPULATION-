@@ -220,7 +220,7 @@ def main():
     
     if not os.path.exists(eval_log):
         with open(eval_log, "w") as f:
-            f.write("iteration,success_rate,closure_rate,drop_rate,retention_rate,composite_score,elapsed_sec,timestamp\n")
+            f.write("iteration,epsilon_ratio,success_rate,closure_rate,drop_rate,retention_rate,raw_drop_rate,r1_succ,r1_clos,r2_succ,r2_clos,composite_score,elapsed_sec,timestamp\n")
             
     print(f"\n[Background Evaluator] Started monitoring: {watch_dir}")
     print(f"  Evaluation Episodes : {args.num_episodes} (across Cylinder, Cube, Cuboid)")
@@ -412,7 +412,7 @@ def main():
                 
                 # Append to history log
                 with open(eval_log, "a") as f:
-                    f.write(f"{it},{active_eps:.4f},{metrics['success_rate']:.4f},{metrics['mean_closure']:.4f},{metrics['pre_goal_drop_rate']:.4f},{metrics['pre_goal_retention']:.4f},{metrics['raw_drop_rate']:.4f},{score:.4f},{t_eval:.2f},{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                    f.write(f"{it},{active_eps:.4f},{metrics['success_rate']:.4f},{metrics['mean_closure']:.4f},{metrics['pre_goal_drop_rate']:.4f},{metrics['pre_goal_retention']:.4f},{metrics['raw_drop_rate']:.4f},{metrics['r1_succ']:.4f},{metrics['r1_clos']:.4f},{metrics['r2_succ']:.4f},{metrics['r2_clos']:.4f},{score:.4f},{t_eval:.2f},{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                     
             except Exception as e:
                 print(f"  [Error evaluating checkpoint {ckpt_file}]: {e}", flush=True)

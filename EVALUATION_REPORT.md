@@ -1,6 +1,6 @@
 ======================================================================================
 IN-HAND MANIPULATION STRATIFIED BENCHMARK REPORT (@10.0% Error Tolerance)
-Checkpoint: best_model/best_model.pth
+Checkpoint: /mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/fine_tune_training/stage2f_eps10/ppo_best_actor.pth
 Total Episodes Evaluated: 600
 ======================================================================================
 
@@ -9,24 +9,24 @@ SECTION 1: RANGE 1 (10.0° to 40.0° Small-to-Medium Rotations)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 100      |   80.0%  |   82.2%  |   91.0%  |    9.0%  |   35.0%  |  56.1°     | 279.5
-Cube         | 100      |   89.0%  |   93.0%  |   99.0%  |    1.0%  |    5.0%  |  26.7°     | 322.8
-Cuboid       | 100      |   89.0%  |   91.6%  |   99.0%  |    1.0%  |    3.0%  |  20.6°     | 289.5
+Cylinder     | 100      |   85.0%  |   86.5%  |   94.0%  |    6.0%  |   30.0%  |  49.5°     | 291.2
+Cube         | 100      |   90.0%  |   92.6%  |   99.0%  |    1.0%  |    5.0%  |  28.2°     | 329.4
+Cuboid       | 100      |   87.0%  |   89.6%  |   99.0%  |    1.0%  |    5.0%  |  23.1°     | 287.4
 ---------------------------------------------------------------------------------------------------------
-RANGE 1 TOTAL | 300      |   86.0%  |   88.9%  |   96.3%  |    3.7%  |   14.3%  |  34.5°     | 297.3
-  --> Range 1 Effective Manipulation Index (EMI): 0.8567 | Benchmark Score: 0.8894
+RANGE 1 TOTAL | 300      |   87.3%  |   89.6%  |   97.3%  |    2.7%  |   13.3%  |  33.6°     | 302.6
+  --> Range 1 Effective Manipulation Index (EMI): 0.8718 | Benchmark Score: 0.9000
 
 ######################################################################################
 SECTION 2: RANGE 2 (40.0° to 90.0° Large-Angle In-Hand Gaiting)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 100      |   20.0%  |   28.0%  |   45.0%  |   55.0%  |   68.0%  |  89.1°     | 429.9
-Cube         | 100      |   33.0%  |   49.9%  |   82.0%  |   18.0%  |   29.0%  |  53.3°     | 527.0
-Cuboid       | 100      |   51.0%  |   65.0%  |   81.0%  |   19.0%  |   28.0%  |  45.2°     | 503.5
+Cylinder     | 100      |   22.0%  |   30.1%  |   46.0%  |   54.0%  |   70.0%  |  89.2°     | 430.8
+Cube         | 100      |   31.0%  |   49.9%  |   84.0%  |   16.0%  |   24.0%  |  52.7°     | 547.6
+Cuboid       | 100      |   50.0%  |   66.4%  |   85.0%  |   15.0%  |   25.0%  |  43.8°     | 493.5
 ---------------------------------------------------------------------------------------------------------
-RANGE 2 TOTAL | 300      |   34.7%  |   47.6%  |   69.3%  |   30.7%  |   41.7%  |  62.6°     | 486.8
-  --> Range 2 Effective Manipulation Index (EMI): 0.3302 | Benchmark Score: 0.4549
+RANGE 2 TOTAL | 300      |   34.3%  |   48.8%  |   71.7%  |   28.3%  |   39.7%  |  61.9°     | 490.6
+  --> Range 2 Effective Manipulation Index (EMI): 0.3498 | Benchmark Score: 0.4614
 
 ======================================================================================
 SECTION 3: GRAND COMPOSITE VERIFICATION SUMMARY (FULL 10° TO 90° ENVELOPE)
@@ -34,15 +34,15 @@ SECTION 3: GRAND COMPOSITE VERIFICATION SUMMARY (FULL 10° TO 90° ENVELOPE)
 Evaluation Metric                   | Range 1 (10°-40°)    | Range 2 (40°-90°)    | Grand Total    
 ------------------------------------------------------------------------------------------------
 Total Evaluated Episodes            | 300                  | 300                  | 600            
-Success Rate (@10% Error)           | 86.0               % | 34.7               % | 60.3          %
-Mean Rotational Closure             | 88.9               % | 47.6               % | 68.3          %
-Pre-Goal Retention Rate             | 96.3               % | 69.3               % | 82.8          %
-Pre-Goal Drop Rate                  | 3.7                % | 30.7               % | 17.2          %
-Raw Drop Rate (All Steps)           | 14.3               % | 41.7               % | 28.0          %
-Mean Final Geodesic Error           | 34.5               ° | 62.6               ° | 48.5          °
-Mean Steps per Episode              | 297.3                | 486.8                | 392.1          
-Peak Hardware Torque                | 5.79             N·m | 6.37             N·m | 6.37        N·m
-Effective Manipulation Index (EMI)  | 0.8567               | 0.3302               | 0.5656         
-Composite Benchmark Score           | 0.8894               | 0.4549               | 0.6722         
+Success Rate (@10% Error)           | 87.3               % | 34.3               % | 60.8          %
+Mean Rotational Closure             | 89.6               % | 48.8               % | 69.2          %
+Pre-Goal Retention Rate             | 97.3               % | 71.7               % | 84.5          %
+Pre-Goal Drop Rate                  | 2.7                % | 28.3               % | 15.5          %
+Raw Drop Rate (All Steps)           | 13.3               % | 39.7               % | 26.5          %
+Mean Final Geodesic Error           | 33.6               ° | 61.9               ° | 47.8          °
+Mean Steps per Episode              | 302.6                | 490.6                | 396.6          
+Peak Hardware Torque                | 5.74             N·m | 6.55             N·m | 6.55        N·m
+Effective Manipulation Index (EMI)  | 0.8718               | 0.3498               | 0.5846         
+Composite Benchmark Score           | 0.9000               | 0.4614               | 0.6807         
 ================================================================================================
 

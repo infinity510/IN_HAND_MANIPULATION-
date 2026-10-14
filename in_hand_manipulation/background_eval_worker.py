@@ -311,9 +311,68 @@ def main():
                 pre_ret = metrics["pre_goal_retention"] * 100
                 raw_drop = metrics["raw_drop_rate"] * 100
                 
-                # Check for improvement
+                # Check for improvement or close contender
                 promoted_str = ""
-                if score > best_score:
+                is_close = (score >= (best_score - 0.015)) and (score <= best_score) and (best_score > 0)
+                
+                if is_close and os.path.exists(best_output):
+                    print(f"\n  [CLOSE CONTENDER DETECTED] Iteration {it:05d} scored {score:.4f}, within {best_score - score:.4f} of Best Actor ({best_score:.4f})!", flush=True)
+                    # Save candidate backup so it is never deleted prematurely
+                    close_backup = os.path.join(watch_dir, f"ppo_close_contender_iter_{it}.pth")
+                    shutil.copy2(ckpt_file, close_backup)
+                    print(f"  [Safety Backup] Preserved close contender to: {os.path.basename(close_backup)}", flush=True)
+                    
+                    # Re-evaluate current best actor on fresh sample
+                    print(f"  [Verification] Re-evaluating current Best Actor ({os.path.basename(best_output)}) on fresh {args.num_episodes}-episode benchmark...", flush=True)
+                    try:
+                        t_reeval = time.time()
+                        reeval_metrics = evaluate_checkpoint(
+                            best_output,
+                            num_episodes=args.num_episodes,
+                            num_workers=args.num_workers,
+                            scene_xml_path=args.scene_xml,
+                            max_goal_angle=args.max_goal_angle,
+                            min_goal_angle=args.min_goal_angle,
+                            epsilon_ratio=active_eps
+                        )
+                        reeval_score = reeval_metrics["score"]
+                        print(f"  [Verification Result] Best Actor fresh score: {reeval_score:.4f} (Prior baseline: {best_score:.4f}) in {time.time()-t_reeval:.1f}s", flush=True)
+                        
+                        # If candidate score is strictly higher than re-evaluated best actor score:
+                        if score > reeval_score:
+                            print(f"  [PROMOTION TRIGGER] Candidate {it:05d} ({score:.4f}) BEATS re-evaluated Best Actor ({reeval_score:.4f})! Promoting candidate!", flush=True)
+                            best_score = score
+                            best_iter = it
+                            shutil.copy2(ckpt_file, best_output)
+                            champion_dir = os.path.join(PROJECT_ROOT, "best_model")
+                            if os.path.exists(champion_dir):
+                                try:
+                                    champion_path = os.path.join(champion_dir, "best_model.pth")
+                                    shutil.copy2(ckpt_file, champion_path)
+                                    readme_path = os.path.join(champion_dir, "README.md")
+                                    with open(readme_path, "w") as rf:
+                                        rf.write("# Best Champion Model (Stratified In-Hand Manipulation)\n\n")
+                                        rf.write(f"- **Checkpoint File**: `best_model.pth`\n")
+                                        rf.write(f"- **Source**: Iteration {it} (Promoted via Close-Contender Re-evaluation)\n")
+                                        rf.write(f"- **Target Precision Envelope**: 10.0% Relative Error Tolerance across 10° to 90° Envelope\n")
+                                        rf.write(f"- **Overall Benchmark Score**: {score:.4f}\n")
+                                        rf.write(f"- **Overall Success Rate (@10% Error)**: {succ:.1f}%\n")
+                                        rf.write(f"- **Overall Rotational Closure**: {clos:.1f}%\n")
+                                        rf.write(f"- **Overall Pre-Goal Retention**: {pre_ret:.1f}%\n\n")
+                                        rf.write(f"### Stratified Angle Range Breakdown\n")
+                                        rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: {metrics['r1_succ']*100:.1f}% Success | {metrics['r1_clos']*100:.1f}% Closure | {metrics['r1_ret']*100:.1f}% Retention\n")
+                                        rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: {metrics['r2_succ']*100:.1f}% Success | {metrics['r2_clos']*100:.1f}% Closure | {metrics['r2_ret']*100:.1f}% Retention\n")
+                                        rf.write(f"- **Last Updated**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                except Exception as ce:
+                                    print(f"  [Champion Update Warning]: {ce}", flush=True)
+                            promoted_str = "  *** [HEAD-TO-HEAD RE-EVALUATION PROMOTION] ***"
+                        else:
+                            print(f"  [Verification Decision] Best Actor retains lead ({reeval_score:.4f} >= {score:.4f}). Updating baseline.", flush=True)
+                            best_score = reeval_score
+                    except Exception as ree:
+                        print(f"  [Re-evaluation Error]: {ree}", flush=True)
+
+                elif score > best_score:
                     best_score = score
                     best_iter = it
                     shutil.copy2(ckpt_file, best_output)

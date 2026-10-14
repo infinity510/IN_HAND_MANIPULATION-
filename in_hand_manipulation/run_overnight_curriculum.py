@@ -406,7 +406,7 @@ def main():
             epsilon_ratio=0.10,
             min_epsilon_ratio=0.10,
             max_goal_angle=1.57,
-            warmup_iters=400,
+            warmup_iters=100,
             w1=2.5,
             w_progress=14.0,
             w_precision=6.0,

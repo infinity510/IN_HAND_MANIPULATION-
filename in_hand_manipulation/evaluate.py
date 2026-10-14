@@ -258,6 +258,40 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                         if cur_torque > peak_torque:
                             peak_torque = cur_torque
 
+                        # Real-time visual orientation arrows:
+                        # Red Arrow: Object's current orientation
+                        # Green Arrow: Desired target orientation
+                        try:
+                            import mujoco
+                            obj_pos = env.data.qpos[obj_idx : obj_idx + 3]
+                            cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
+                            cur_mat = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]]).as_matrix()
+                            tgt_q = env.target_quat
+                            tgt_mat = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]]).as_matrix()
+
+                            with viewer.lock():
+                                viewer.user_scn.ngeom = 2
+                                # Red arrow: Current object orientation
+                                mujoco.mjv_initGeom(
+                                    viewer.user_scn.geoms[0],
+                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
+                                    size=np.array([0.005, 0.005, 0.12], dtype=np.float64),
+                                    pos=obj_pos.astype(np.float64),
+                                    mat=cur_mat.flatten().astype(np.float64),
+                                    rgba=np.array([1.0, 0.1, 0.1, 0.95], dtype=np.float32),  # RED
+                                )
+                                # Green arrow: Desired target orientation
+                                mujoco.mjv_initGeom(
+                                    viewer.user_scn.geoms[1],
+                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
+                                    size=np.array([0.005, 0.005, 0.12], dtype=np.float64),
+                                    pos=obj_pos.astype(np.float64),
+                                    mat=tgt_mat.flatten().astype(np.float64),
+                                    rgba=np.array([0.1, 1.0, 0.1, 0.95], dtype=np.float32),  # GREEN
+                                )
+                        except Exception:
+                            pass
+
                         viewer.sync()
                         time.sleep(0.015)
 

@@ -188,6 +188,7 @@ class DeltoInHandManipulationEnv:
         substeps: int = 10,
         render_mode: bool = False,
         dr_ratio: float = 0.30,
+        min_goal_angle: float = 0.17453,
         max_goal_angle: float = math.pi,
         steps_per_radian: int = 200,
         bonus_steps_per_success: int = 150,
@@ -208,6 +209,7 @@ class DeltoInHandManipulationEnv:
         self.substeps = substeps  # 10 substeps * 0.002s = 0.02s per RL step (50 Hz)
         self.render_mode = render_mode
         self.viewer = None
+        self.min_goal_angle = float(min_goal_angle)
         self.max_goal_angle = float(max_goal_angle)
         
         # Domain Randomization Setup (+-30% on mass, friction, and size)
@@ -268,8 +270,6 @@ class DeltoInHandManipulationEnv:
         
         # Adaptive Object Performance Tracking [successes, attempts] for hard-negative sampling
         self.object_performance = {1: [3, 10], 2: [4, 10], 3: [6, 10]}
-        self.min_goal_angle = 0.17453  # 10.0 degrees in radians
-        self.max_goal_angle = 1.5708   # 90.0 degrees in radians
         
         # Palm origin is at (0, 0, 0) where the Delto finger base mounts intersect
         self.palm_position = np.array([0.0, 0.0, 0.0], dtype=np.float32)
@@ -569,8 +569,8 @@ class DeltoInHandManipulationEnv:
         # Plus an additional quadratic precision boost when entering sub-15% error (step_closure > 0.85)
         # creating a steep funnel pulling the policy directly into the >=95% closure zone.
         closure_reward = w.w1 * (step_closure ** 2 + 0.5 * (step_closure ** 4))
-        if step_closure > 0.85:
-            closure_reward += 3.0 * float(((step_closure - 0.85) / 0.15) ** 2)
+        if step_closure > 0.75:
+            closure_reward += 4.0 * float(((step_closure - 0.75) / 0.25) ** 2)
         
         # (a1) Pure Angular Progress Reward with Asymmetric Goal Acceleration:
         # Full accelerating progress on positive rotation toward target.
@@ -582,15 +582,14 @@ class DeltoInHandManipulationEnv:
         else:
             progress_reward = 0.25 * w.w_progress * angular_progress
         
-        # (a2) Precision Pocket Guidance Attractor (Inverse-Gaussian Well):
-        # Continuous magnetic guidance centered at the target orientation.
-        # Rises smoothly as relative error approaches the 5% tolerance standard (w.epsilon_ratio).
+        # (a2) Multi-Scale Smooth Gravitational Attractor:
+        # Tier 1 (Wide Exponential Funnel): Active across all angles (scale = 0.15).
+        # Provides continuous, non-zero gradient pulling the policy from 60%-85% closure straight into 95% closure.
+        # Tier 2 (Precision Lock-in Well): Sharp Gaussian centered at target orientation for strict sub-5% error.
         rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
-        if rel_error < 0.15:
-            error_ratio = rel_error / (w.epsilon_ratio + 1e-6)
-            precision_bonus = w.w_precision * float(np.exp(-0.5 * (error_ratio ** 2)))
-        else:
-            precision_bonus = 0.0
+        wide_funnel = float(np.exp(- min(4.0, rel_error / 0.15)))
+        tight_core = float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
+        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -658,6 +657,11 @@ class DeltoInHandManipulationEnv:
         base_alive = getattr(w, 'w_alive', 0.80)
         alive_reward = 0.0 if is_dropped else float(base_alive * (0.25 + 0.75 * step_closure))
         
+        # Anti-plateau urgency pressure on incomplete rotation:
+        # Prevents policy from idling at 40-80% closure to collect passive alive rewards.
+        # Gradually bleeds reward until target tolerance is reached (closure >= 95%).
+        closure_deficit_penalty = 0.20 * float(max(0.0, 0.95 - step_closure))
+        
         step_cost = getattr(w, 'w_step_penalty', 0.00)
         
         reward = (
@@ -674,6 +678,7 @@ class DeltoInHandManipulationEnv:
             - drop_penalty
             + (w.w6 * float(n_c))
             - zero_contact_pen
+            - closure_deficit_penalty
             - step_cost
         )
         
@@ -1287,6 +1292,7 @@ class PPOFineTuner:
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
                 dr_ratio=self.cfg.dr_ratio,
+                min_goal_angle=self.cfg.min_goal_angle,
                 max_goal_angle=init_goal_angle,
                 steps_per_radian=self.cfg.steps_per_radian,
                 bonus_steps_per_success=self.cfg.bonus_steps_per_success,
@@ -1298,6 +1304,12 @@ class PPOFineTuner:
         else:
             print(f"[PPOFineTuner] Spawning {self.cfg.num_envs} parallel MuJoCo worker processes...")
             self.vec_env = SubprocVecEnv([make_env_fn for _ in range(self.cfg.num_envs)])
+            
+        # Explicit initial curriculum synchronization to all worker environments
+        self.vec_env.set_min_goal_angle(self.cfg.min_goal_angle)
+        self.vec_env.set_max_goal_angle(init_goal_angle)
+        self.vec_env.set_epsilon_ratio(init_eps_ratio)
+        self.vec_env.set_epsilon(self.cfg.epsilon)
             
         # 6. Persistent Telemetry Queues across rollout boundaries (maxlen=100 for smooth rolling metrics)
         self.recent_returns = deque(maxlen=100)

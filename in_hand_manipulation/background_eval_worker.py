@@ -232,13 +232,19 @@ def main():
     best_score = -1.0
     best_iter = -1
     
-    # If a best model already exists, initialize baseline
-    if os.path.exists(best_output):
+    # If a best model already exists, initialize baseline from local or global champion
+    target_baseline = best_output
+    if not os.path.exists(target_baseline) and args.update_global_best:
+        global_champ = os.path.join(PROJECT_ROOT, "best_model", "best_model.pth")
+        if os.path.exists(global_champ):
+            target_baseline = global_champ
+            
+    if os.path.exists(target_baseline):
         try:
-            print(f"[Background Evaluator] Benchmarking existing baseline: {best_output}...")
+            print(f"[Background Evaluator] Benchmarking reigning champion baseline: {target_baseline}...")
             t0 = time.time()
             base_metrics = evaluate_checkpoint(
-                best_output, 
+                target_baseline, 
                 num_episodes=args.num_episodes, 
                 num_workers=args.num_workers,
                 scene_xml_path=args.scene_xml,
@@ -247,7 +253,7 @@ def main():
                 epsilon_ratio=args.epsilon_ratio
             )
             best_score = base_metrics["score"]
-            print(f"  Existing Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
+            print(f"  Reigning Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
         except Exception as e:
             print(f"  Could not evaluate initial baseline: {e}")
             

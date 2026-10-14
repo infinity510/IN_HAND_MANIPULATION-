@@ -20,7 +20,11 @@ OUTPUT_PNG = os.path.join(ARTIFACT_DIR, "run_since_830_progress.png")
 os.makedirs(ARTIFACT_DIR, exist_ok=True)
 
 # 1. Parse Benchmark History (500-episode evals)
-eval_path = os.path.join(PROJECT_ROOT, "stage2_unified", "eval_benchmark_history.csv")
+active_dir = os.path.join(PROJECT_ROOT, "fine_tune_training")
+if not os.path.exists(os.path.join(active_dir, "progress.csv")):
+    active_dir = os.path.join(PROJECT_ROOT, "stage2_unified")
+
+eval_path = os.path.join(active_dir, "eval_benchmark_history.csv")
 b_iters = []
 b_succ = []
 b_drop = []
@@ -36,17 +40,19 @@ if os.path.exists(eval_path):
         p = l.split(",")
         if len(p) >= 10:
             ts = p[9]
-            if ts >= "2026-10-14 08:30:00":
-                b_iters.append(int(p[0]))
-                b_succ.append(float(p[2]) * 100)
-                b_clos.append(float(p[3]) * 100)
-                b_drop.append(float(p[4]) * 100)
-                b_ret.append(float(p[5]) * 100)
-                b_score.append(float(p[7]))
+            b_iters.append(int(p[0]))
+            b_succ.append(float(p[2]) * 100)
+            b_clos.append(float(p[3]) * 100)
+            b_drop.append(float(p[4]) * 100)
+            b_ret.append(float(p[5]) * 100)
+            b_score.append(float(p[7]))
+            try:
                 b_times.append(datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+            except Exception:
+                pass
 
 # 2. Parse Continuous Progress CSV (Rollouts)
-prog_path = os.path.join(PROJECT_ROOT, "stage2_unified", "progress.csv")
+prog_path = os.path.join(active_dir, "progress.csv")
 r_iters = []
 r_succ = []
 r_drop = []

@@ -242,6 +242,13 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                     env.current_max_steps = min(800, quad_steps)
                     env.set_epsilon(epsilon_ratio * theta_rad)
 
+                    # Determine reference axis that has maximal angular difference between initial and target
+                    half_height = 0.045 if obj_id == 2 else 0.07
+                    cur_rot_init = transform.Rotation.from_quat([cur_obj_quat[1], cur_obj_quat[2], cur_obj_quat[3], cur_obj_quat[0]])
+                    tgt_rot_init = transform.Rotation.from_quat([env.target_quat[1], env.target_quat[2], env.target_quat[3], env.target_quat[0]])
+                    candidate_axes = [np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0]), np.array([0.0, 1.0, 0.0])]
+                    episode_ref_axis = max(candidate_axes, key=lambda u: np.linalg.norm(cur_rot_init.apply(u) - tgt_rot_init.apply(u)))
+
                     step = 0
                     terminated = False
                     truncated = False
@@ -259,38 +266,97 @@ def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_
                             peak_torque = cur_torque
 
                         # Real-time visual orientation arrows:
-                        # Red Arrow: Object's current orientation
-                        # Green Arrow: Desired target orientation
+                        # Red Arrow: Object's current 3D orientation
+                        # Green Arrow: Desired target 3D orientation
                         try:
-                            import mujoco
-                            obj_pos = env.data.qpos[obj_idx : obj_idx + 3]
+                            obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
                             cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
-                            cur_mat = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]]).as_matrix()
+                            cur_rot = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]])
                             tgt_q = env.target_quat
-                            tgt_mat = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]]).as_matrix()
+                            tgt_rot = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]])
+
+                            # Base point: anchored on the top face of the object (above black marker)
+                            # This ensures the arrows are prominently visible and never occluded inside the object body
+                            top_offset = cur_rot.apply(np.array([0.0, 0.0, half_height + 0.006]))
+                            base_point = obj_pos + top_offset
+
+                            cur_dir = cur_rot.apply(episode_ref_axis)
+                            tgt_dir = tgt_rot.apply(episode_ref_axis)
+
+                            arrow_len = 0.16
+                            arrow_rad = 0.010
+                            p2_cur = base_point + arrow_len * cur_dir
+                            p2_tgt = base_point + arrow_len * tgt_dir
 
                             with viewer.lock():
-                                viewer.user_scn.ngeom = 2
-                                # Red arrow: Current object orientation
+                                viewer.user_scn.ngeom = 0
+
+                                # 1. Yellow anchor hub sphere on top marker
+                                hub_geom = viewer.user_scn.geoms[viewer.user_scn.ngeom]
                                 mujoco.mjv_initGeom(
-                                    viewer.user_scn.geoms[0],
-                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
-                                    size=np.array([0.005, 0.005, 0.12], dtype=np.float64),
-                                    pos=obj_pos.astype(np.float64),
-                                    mat=cur_mat.flatten().astype(np.float64),
-                                    rgba=np.array([1.0, 0.1, 0.1, 0.95], dtype=np.float32),  # RED
+                                    hub_geom,
+                                    type=mujoco.mjtGeom.mjGEOM_SPHERE,
+                                    size=np.array([0.009, 0.009, 0.009], dtype=np.float64),
+                                    pos=base_point.astype(np.float64),
+                                    mat=np.eye(3).flatten().astype(np.float64),
+                                    rgba=np.array([1.0, 0.85, 0.0, 1.0], dtype=np.float32),
                                 )
-                                # Green arrow: Desired target orientation
+                                hub_geom.category = mujoco.mjtCatBit.mjCAT_DECOR
+                                viewer.user_scn.ngeom += 1
+
+                                # 2. Red Arrow: Current Object Orientation
+                                g_cur = viewer.user_scn.geoms[viewer.user_scn.ngeom]
                                 mujoco.mjv_initGeom(
-                                    viewer.user_scn.geoms[1],
+                                    g_cur,
                                     type=mujoco.mjtGeom.mjGEOM_ARROW,
-                                    size=np.array([0.005, 0.005, 0.12], dtype=np.float64),
-                                    pos=obj_pos.astype(np.float64),
-                                    mat=tgt_mat.flatten().astype(np.float64),
-                                    rgba=np.array([0.1, 1.0, 0.1, 0.95], dtype=np.float32),  # GREEN
+                                    size=np.zeros(3, dtype=np.float64),
+                                    pos=np.zeros(3, dtype=np.float64),
+                                    mat=np.eye(3).flatten().astype(np.float64),
+                                    rgba=np.array([1.0, 0.05, 0.05, 1.0], dtype=np.float32),  # Bright RED
                                 )
-                        except Exception:
-                            pass
+                                mujoco.mjv_connector(
+                                    g_cur,
+                                    mujoco.mjtGeom.mjGEOM_ARROW,
+                                    arrow_rad,
+                                    base_point,
+                                    p2_cur,
+                                )
+                                g_cur.category = mujoco.mjtCatBit.mjCAT_DECOR
+                                viewer.user_scn.ngeom += 1
+
+                                # 3. Green Arrow: Desired Target Orientation
+                                g_tgt = viewer.user_scn.geoms[viewer.user_scn.ngeom]
+                                mujoco.mjv_initGeom(
+                                    g_tgt,
+                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
+                                    size=np.zeros(3, dtype=np.float64),
+                                    pos=np.zeros(3, dtype=np.float64),
+                                    mat=np.eye(3).flatten().astype(np.float64),
+                                    rgba=np.array([0.05, 1.0, 0.05, 1.0], dtype=np.float32),  # Bright GREEN
+                                )
+                                mujoco.mjv_connector(
+                                    g_tgt,
+                                    mujoco.mjtGeom.mjGEOM_ARROW,
+                                    arrow_rad,
+                                    base_point,
+                                    p2_tgt,
+                                )
+                                g_tgt.category = mujoco.mjtCatBit.mjCAT_DECOR
+                                viewer.user_scn.ngeom += 1
+
+                            # Overlay real-time HUD telemetry on passive viewer
+                            cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
+                            tol_deg = float(epsilon_ratio * init_angle_deg)
+                            viewer.set_texts([
+                                (
+                                    mujoco.mjtFontScale.mjFONTSCALE_150,
+                                    mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                    f"RED: Current | GREEN: Target | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
+                                    f"Err: {cur_err_deg:.1f}° (Tol: {tol_deg:.1f}°) | Goals: {step_info.get('successes_in_episode', 0)} | Step: {step}",
+                                )
+                            ])
+                        except Exception as err:
+                            print(f"[Viewer Warning] Arrow rendering error: {err}")
 
                         viewer.sync()
                         time.sleep(0.015)

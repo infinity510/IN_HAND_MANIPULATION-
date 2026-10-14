@@ -91,6 +91,7 @@ class RewardWeights:
     w_angvel_brake: float = 0.50 # Object angular velocity braking penalty weight near target
     w_anti_stall: float = 0.25   # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50   # Precision grasp lock-in bonus weight for multi-point contact at goal
+    w_cradle_bonus: float = 0.40 # Palm cradle centering stability bonus to prevent cylindrical roll-slip
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.20     # Target orientation error threshold as ratio of initial angle (e.g. 0.20 = 20%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -163,6 +164,7 @@ class PPOConfig:
     w_angvel_brake: float = 0.50     # Object angular velocity braking penalty weight near target
     w_anti_stall: float = 0.25       # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50       # Precision grasp lock-in bonus weight for multi-point contact at goal
+    w_cradle_bonus: float = 0.40     # Palm cradle centering stability bonus
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -642,8 +644,12 @@ class DeltoInHandManipulationEnv:
         w_stall = getattr(w, 'w_anti_stall', 0.25)
         stall_penalty = w_stall if (obj_angvel_norm < 0.03 and rel_error > w.epsilon_ratio) else 0.0
         
-        # (d) Distance from palm center
+        # (d) Distance from palm center & Palm Cradle Centering Stability Bonus
         dist_to_palm = float(np.linalg.norm(obj_pos - self.palm_position))
+        xy_dist = float(np.linalg.norm(obj_pos[:2]))
+        z_dev = float(abs(obj_pos[2] - 0.10))
+        w_cradle = getattr(w, 'w_cradle_bonus', 0.40)
+        cradle_bonus = w_cradle * float(np.exp(- ((xy_dist / 0.04) ** 2) - ((z_dev / 0.03) ** 2)))
         
         # (e) Contact points & Precision Lock-In Bonus
         n_c = self.count_contacts()
@@ -697,6 +703,7 @@ class DeltoInHandManipulationEnv:
             + precision_bonus
             + alive_reward
             + lock_bonus
+            + cradle_bonus
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
@@ -1321,6 +1328,7 @@ class PPOFineTuner:
                     w_angvel_brake=getattr(self.cfg, 'w_angvel_brake', 0.50),
                     w_anti_stall=getattr(self.cfg, 'w_anti_stall', 0.25),
                     w_lock_bonus=getattr(self.cfg, 'w_lock_bonus', 0.50),
+                    w_cradle_bonus=getattr(self.cfg, 'w_cradle_bonus', 0.40),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -2016,6 +2024,7 @@ def parse_args():
     parser.add_argument("--w_angvel_brake", type=float, default=0.50, help="Object angular velocity braking weight near target (default: 0.50)")
     parser.add_argument("--w_anti_stall", type=float, default=0.25, help="Anti-stall penalty weight when stationary outside goal (default: 0.25)")
     parser.add_argument("--w_lock_bonus", type=float, default=0.50, help="Precision grasp lock-in bonus weight for multi-point contacts at goal (default: 0.50)")
+    parser.add_argument("--w_cradle_bonus", type=float, default=0.40, help="Palm cradle centering stability bonus (default: 0.40)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
@@ -2108,6 +2117,7 @@ def main():
         w_angvel_brake=args.w_angvel_brake,
         w_anti_stall=args.w_anti_stall,
         w_lock_bonus=args.w_lock_bonus,
+        w_cradle_bonus=args.w_cradle_bonus,
         save_freq=args.save_freq,
         render=args.render,
         show_actions=args.show_actions,

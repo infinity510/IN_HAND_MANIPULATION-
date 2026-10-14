@@ -688,9 +688,8 @@ class DeltoInHandManipulationEnv:
             "is_dropped": bool(is_dropped and self.episode_successes < 2),
             "raw_dropped": is_dropped,
             "reward_components": {
-                "angular_reward": orientation_reward,
                 "progress_reward": progress_reward,
-                "precision_reward": precision_reward,
+                "precision_bonus": precision_bonus,
                 "control_penalty": - (w.w2 * control_norm_sq),
                 "action_rate_penalty": - action_rate_penalty,
                 "velocity_penalty": - (w.w3 * vel_norm_sq),
@@ -698,6 +697,7 @@ class DeltoInHandManipulationEnv:
                 "drop_penalty": - drop_penalty,
                 "contact_reward": w.w6 * float(n_c),
                 "zero_contact_penalty": - zero_contact_pen,
+                "step_penalty": - step_cost,
             }
         }
         

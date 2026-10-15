@@ -238,7 +238,7 @@ def main():
                             trigger_reason = ""
 
                             # Condition 1: Severe drop from peak (> max_drop)
-                            if (peak_score - cur_score) >= args.max_drop and peak_score > 0.65:
+                            if (peak_score - cur_score) >= args.max_drop and peak_score > 0.50:
                                 triggered = True
                                 trigger_reason = f"Severe score drop (-{drop_from_peak:.4f} >= -{args.max_drop:.4f}) below all-time peak ({peak_score:.4f} at Iter {peak_iter})"
 

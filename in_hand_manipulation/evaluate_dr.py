@@ -99,6 +99,7 @@ def _worker_init(
     epsilon_ratio,
     smooth_alpha,
     action_delay_max,
+    vision_delay_max,
     obs_noise_scale,
     dr_ratio,
 ):
@@ -121,6 +122,8 @@ def _worker_init(
         max_steps_cap=800,
         sim2real_dr=True,
         action_delay_max=action_delay_max,
+        vision_delay_max=vision_delay_max,
+        smooth_alpha=smooth_alpha,
         obs_noise_scale=obs_noise_scale,
     )
 
@@ -167,21 +170,12 @@ def _eval_single_task(task_args):
     truncated = False
     step_info = {}
     peak_torque = 0.0
-    smoothed_act = None
 
     while not (terminated or truncated):
         step += 1
         with torch.no_grad():
             raw_act = _w_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-        if _w_smooth_alpha >= 1.0:
-            act_to_step = raw_act
-        else:
-            if smoothed_act is None:
-                smoothed_act = raw_act.copy()
-            else:
-                smoothed_act = _w_smooth_alpha * raw_act + (1.0 - _w_smooth_alpha) * smoothed_act
-            act_to_step = smoothed_act
-        obs, reward, terminated, truncated, step_info = _w_env.step(act_to_step)
+        obs, reward, terminated, truncated, step_info = _w_env.step(raw_act)
 
         cur_torque = float(np.max(np.abs(_w_env.data.actuator_force)))
         if cur_torque > peak_torque:
@@ -274,11 +268,12 @@ def run_rendered_evaluation(
     episodes_per_range: int,
     epsilon_ratio: float,
     action_delay_max: int = 1,
+    vision_delay_max: int = 2,
     obs_noise_scale: float = 0.80,
     dr_ratio: float = 0.30,
     hold_time: float = 1.2,
     max_goals: int = 1,
-    smooth_alpha: float = 0.50,
+    smooth_alpha: float = 0.70,
     sample_mode: str = "shuffle",
     report_file: str = "EVALUATION_DR_REPORT.md",
 ):
@@ -291,7 +286,8 @@ def run_rendered_evaluation(
         return
 
     print(f"\n[Viewer] Launching Interactive MuJoCo Visual Domain Randomization Evaluation: {checkpoint_path}")
-    print(f"  DR Settings: action_delay_max={action_delay_max} (up to {action_delay_max*20}ms lag) | "
+    print(f"  DR Settings: action_delay_max={action_delay_max} (up to {action_delay_max*20}ms) | "
+          f"vision_delay_max={vision_delay_max} ({vision_delay_max*20}ms ArUco delay) | "
           f"obs_noise_scale={obs_noise_scale:.2f} | dr_ratio=±{int(dr_ratio*100)}%\n")
 
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
@@ -315,6 +311,8 @@ def run_rendered_evaluation(
         max_steps_cap=800,
         sim2real_dr=True,
         action_delay_max=action_delay_max,
+        vision_delay_max=vision_delay_max,
+        smooth_alpha=smooth_alpha,
         obs_noise_scale=obs_noise_scale,
     )
 
@@ -527,9 +525,10 @@ def run_parallel_evaluation(
     episodes_per_range: int = 100,
     num_workers: int = 16,
     epsilon_ratio: float = 0.10,
-    smooth_alpha: float = 1.0,
+    smooth_alpha: float = 0.70,
     sample_mode: str = "shuffle",
     action_delay_max: int = 1,
+    vision_delay_max: int = 2,
     obs_noise_scale: float = 0.80,
     dr_ratio: float = 0.30,
     report_file: str = "EVALUATION_DR_REPORT.md",
@@ -538,6 +537,8 @@ def run_parallel_evaluation(
     print(f"\n[Domain Randomization Evaluator] Loading Checkpoint: {checkpoint_path}")
     print(f"  Sim-to-Real DR Parameters:")
     print(f"    - Actuation Latency Buffer : 0 to {action_delay_max} steps (0 - {action_delay_max*20} ms lag)")
+    print(f"    - ArUco Vision Latency     : 1 to {vision_delay_max} steps (20 - {vision_delay_max*20} ms lag)")
+    print(f"    - Action Smooth Alpha      : {smooth_alpha:.2f}")
     print(f"    - Observation Sensor Noise : Scale {obs_noise_scale:.2f} (encoder, velocity, vision jitter)")
     print(f"    - Silicone Friction Band   : μ in [2.1, 3.9] (±30% dynamic sliding friction)")
     print(f"    - Object Property Variation: ±{int(dr_ratio*100)}% (mass, friction, geometry)")
@@ -584,6 +585,7 @@ def run_parallel_evaluation(
         epsilon_ratio,
         smooth_alpha,
         action_delay_max,
+        vision_delay_max,
         obs_noise_scale,
         dr_ratio,
     )
@@ -598,6 +600,8 @@ def run_parallel_evaluation(
 
     dr_info = {
         "action_delay_max": action_delay_max,
+        "vision_delay_max": vision_delay_max,
+        "smooth_alpha": smooth_alpha,
         "obs_noise_scale": obs_noise_scale,
         "dr_ratio": dr_ratio,
     }
@@ -643,6 +647,8 @@ def generate_metric_report(results, epsilon_ratio: float, checkpoint_path: str, 
         return ""
 
     action_delay_max = dr_info.get("action_delay_max", 1)
+    vision_delay_max = dr_info.get("vision_delay_max", 2)
+    smooth_alpha = dr_info.get("smooth_alpha", 0.70)
     obs_noise_scale = dr_info.get("obs_noise_scale", 0.80)
     dr_ratio = dr_info.get("dr_ratio", 0.30)
 
@@ -653,6 +659,8 @@ def generate_metric_report(results, epsilon_ratio: float, checkpoint_path: str, 
     lines.append(f"Total Episodes Evaluated: {len(results)}")
     lines.append(f"DR Conditions:")
     lines.append(f"  • Actuation Delay: 0 to {action_delay_max} steps (0 to {action_delay_max*20} ms lag)")
+    lines.append(f"  • ArUco Vision Latency: 1 to {vision_delay_max} steps (20 to {vision_delay_max*20} ms camera+pose lag)")
+    lines.append(f"  • Action Smoothing Filter Alpha: {smooth_alpha:.2f}")
     lines.append(f"  • Observation Sensor Noise Scale: {obs_noise_scale:.2f}")
     lines.append(f"  • Fingertip/Palm Silicone Friction: μ in [2.1, 3.9]")
     lines.append(f"  • Object Geometry / Mass / Friction: ±{int(dr_ratio*100)}%")
@@ -782,6 +790,12 @@ def main():
         help="Maximum action delay steps (default: 1 -> 0 to 20ms delay queue matching real CAN bus)",
     )
     parser.add_argument(
+        "--vision_delay_max",
+        type=int,
+        default=2,
+        help="Maximum ArUco vision delay steps (default: 2 -> 20 to 40ms camera capture + pose estimation latency)",
+    )
+    parser.add_argument(
         "--obs_noise_scale",
         type=float,
         default=0.80,
@@ -814,8 +828,8 @@ def main():
     parser.add_argument(
         "--smooth_alpha",
         type=float,
-        default=1.0,
-        help="Action filter alpha (default: 1.0 = raw policy actions for peak benchmark accuracy)",
+        default=0.70,
+        help="Action filter alpha (default: 0.70 exponential smoothing filter)",
     )
     parser.add_argument(
         "--sample_mode",
@@ -853,6 +867,7 @@ def main():
             episodes_per_range=args.episodes_per_range,
             epsilon_ratio=args.epsilon_ratio,
             action_delay_max=args.action_delay_max,
+            vision_delay_max=args.vision_delay_max,
             obs_noise_scale=args.obs_noise_scale,
             dr_ratio=args.dr_ratio,
             hold_time=args.hold_time,
@@ -871,6 +886,7 @@ def main():
             smooth_alpha=args.smooth_alpha,
             sample_mode=args.sample_mode,
             action_delay_max=args.action_delay_max,
+            vision_delay_max=args.vision_delay_max,
             obs_noise_scale=args.obs_noise_scale,
             dr_ratio=args.dr_ratio,
             report_file=args.report_file,

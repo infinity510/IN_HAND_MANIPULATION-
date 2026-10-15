@@ -46,9 +46,10 @@ def _init_eval_worker(
     max_goal_angle,
     min_goal_angle,
     epsilon_ratio,
-    smooth_alpha=1.0,
+    smooth_alpha=0.70,
     sim2real_dr=False,
     action_delay_max=1,
+    vision_delay_max=2,
     obs_noise_scale=0.80,
     dr_ratio=0.30,
 ):
@@ -72,6 +73,8 @@ def _init_eval_worker(
         max_steps_cap=800,
         sim2real_dr=sim2real_dr,
         action_delay_max=action_delay_max,
+        vision_delay_max=vision_delay_max,
+        smooth_alpha=smooth_alpha,
         obs_noise_scale=obs_noise_scale,
     )
 
@@ -115,17 +118,12 @@ def _eval_single_episode(task_tuple):
     truncated = False
     step_info = {}
     goals_achieved = 0
-    smoothed_act = None
-    
+
     while not (terminated or truncated):
         step += 1
         with torch.no_grad():
             raw_act = _worker_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-        if smoothed_act is None:
-            smoothed_act = raw_act.copy()
-        else:
-            smoothed_act = _worker_smooth_alpha * raw_act + (1.0 - _worker_smooth_alpha) * smoothed_act
-        obs, reward, terminated, truncated, step_info = _worker_env.step(smoothed_act)
+        obs, reward, terminated, truncated, step_info = _worker_env.step(raw_act)
         goals_achieved = step_info.get("successes_in_episode", 0)
         if goals_achieved >= 1:
             break
@@ -167,9 +165,10 @@ def evaluate_checkpoint(
     max_goal_angle: float,
     min_goal_angle: float,
     epsilon_ratio: float,
-    smooth_alpha: float = 1.0,
+    smooth_alpha: float = 0.70,
     sim2real_dr: bool = False,
     action_delay_max: int = 1,
+    vision_delay_max: int = 2,
     obs_noise_scale: float = 0.80,
     dr_ratio: float = 0.30,
 ):
@@ -189,6 +188,7 @@ def evaluate_checkpoint(
         smooth_alpha,
         sim2real_dr,
         action_delay_max,
+        vision_delay_max,
         obs_noise_scale,
         dr_ratio,
     )
@@ -268,13 +268,14 @@ def main():
     parser.add_argument("--max_goal_angle", type=float, default=1.57, help="Max target rotation angle in radians")
     parser.add_argument("--min_goal_angle", type=float, default=0.15, help="Min target rotation angle in radians")
     parser.add_argument("--epsilon_ratio", type=float, default=0.10, help="Target relative error threshold (default: 0.10)")
-    parser.add_argument("--smooth_alpha", type=float, default=1.0, help="Action smoothing alpha (default: 1.0 for peak benchmark accuracy)")
+    parser.add_argument("--smooth_alpha", type=float, default=0.70, help="Action smoothing alpha (default: 0.70)")
     parser.add_argument("--delete_checkpoints", action="store_true", default=False, help="Delete intermediate milestone checkpoints after evaluation")
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")
     parser.add_argument("--update_global_best", action="store_true", help="Also promote to global best_model/best_model.pth")
     parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization during evaluation")
     parser.add_argument("--action_delay_max", type=int, default=1, help="Max action delay steps for DR evaluation (default: 1 -> 20ms)")
+    parser.add_argument("--vision_delay_max", type=int, default=2, help="Max ArUco vision latency steps (default: 2 -> 40ms)")
     parser.add_argument("--obs_noise_scale", type=float, default=0.80, help="Observation noise scale factor (default: 0.80)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (default: 0.30)")
     args = parser.parse_args()
@@ -292,7 +293,7 @@ def main():
     print(f"  Evaluation Episodes : {args.num_episodes} (across Cylinder, Cube, Cuboid)")
     print(f"  Workers             : {args.num_workers}")
     print(f"  Target Tolerance    : {args.epsilon_ratio*100:.1f}% error | Max Angle: {np.degrees(args.max_goal_angle):.1f}°")
-    print(f"  Sim-to-Real DR      : {'ACTIVE (Delay=' + str(args.action_delay_max*20) + 'ms, Noise=' + str(args.obs_noise_scale) + ', DR=±' + str(int(args.dr_ratio*100)) + '%)' if args.sim2real_dr else 'CLEAN SIM'}")
+    print(f"  Sim-to-Real DR      : {'ACTIVE (ActDelay=' + str(args.action_delay_max*20) + 'ms, VisDelay=' + str(args.vision_delay_max*20) + 'ms, Noise=' + str(args.obs_noise_scale) + ', DR=±' + str(int(args.dr_ratio*100)) + '%)' if args.sim2real_dr else 'CLEAN SIM'}")
     print(f"  Best Model Output   : {best_output}")
     print(f"  Stop Flag Trigger   : {stop_flag}\n", flush=True)
     
@@ -321,6 +322,7 @@ def main():
                 smooth_alpha=args.smooth_alpha,
                 sim2real_dr=args.sim2real_dr,
                 action_delay_max=args.action_delay_max,
+                vision_delay_max=args.vision_delay_max,
                 obs_noise_scale=args.obs_noise_scale,
                 dr_ratio=args.dr_ratio,
             )
@@ -374,14 +376,8 @@ def main():
             print(f"[Background Evaluator] === Evaluating Checkpoint Iteration {it:05d} ({args.num_episodes} episodes) ===", flush=True)
             t_start = time.time()
             try:
-                # Dynamically retrieve active epsilon_ratio stored in checkpoint
-                active_eps = args.epsilon_ratio
-                try:
-                    payload_meta = torch.load(ckpt_file, map_location="cpu", weights_only=False)
-                    if "config" in payload_meta and "epsilon_ratio" in payload_meta["config"]:
-                        active_eps = float(payload_meta["config"]["epsilon_ratio"])
-                except Exception:
-                    pass
+                # Maintain the explicit benchmark tolerance specified via CLI (--epsilon_ratio)
+                active_eps = args.epsilon_ratio if args.epsilon_ratio is not None else 0.10
 
                 metrics = evaluate_checkpoint(
                     ckpt_file,
@@ -394,6 +390,7 @@ def main():
                     smooth_alpha=args.smooth_alpha,
                     sim2real_dr=args.sim2real_dr,
                     action_delay_max=args.action_delay_max,
+                    vision_delay_max=args.vision_delay_max,
                     obs_noise_scale=args.obs_noise_scale,
                     dr_ratio=args.dr_ratio,
                 )

@@ -1,41 +1,36 @@
-# Best Champion Model (Stratified In-Hand Manipulation)
+# Champion Production Models (Delto In-Hand Manipulation)
 
-- **Checkpoint File**: `best_model.pth`
-- **Source**: Iteration 300 (Sim-to-Real Robust Training, Promoted by Early Stopping Watchdog)
-- **Target Precision Envelope**: 10.0% Relative Error Tolerance across 10° to 90° Envelope
-- **Architecture**: 12-DOF Delto 3-Finger Robotic Gripper
-- **Action Rate Smoothing**: $\beta = 0.50$ Action Low-Pass Filter (Zero Motor Tremor)
-- **Presentation Hold**: 1.5-second Firm Lock-In at Target Goal
-- **Last Updated**: 2026-10-15
+This directory contains the two primary champion models for the Delto 12-DOF hand:
 
 ---
 
-### 🏆 Canonical 600-Episode Benchmark Summary (@10.0% Tolerance)
+## 1. Ideal Case Champion: `best_model_clean.pth`
 
-- **Overall Composite Benchmark Score**: **`0.7149`** (Beats prior 0.7026 record)
-- **Overall Success Rate**: **`63.7%`** across all objects and full $10^\circ - 90^\circ$ envelope
-- **Overall Rotational Closure**: **`74.3%`**
-- **Overall Grasp Retention**: **`86.8%`**
-- **Range 1 ($10^\circ - 40^\circ$) Success Rate**: **`77.7%`** | Rotational Closure: **`88.1%`** | Grasp Retention: **`98.0%`**
-  - **Cylinder**: **`91.0%`** Success | **`92.8%`** Closure | **`96.0%`** Retention
-  - **Cube**: **`71.0%`** Success | **`86.7%`** Closure | **`100.0%`** Retention (Zero drops!)
-  - **Cuboid**: **`71.0%`** Success | **`84.6%`** Closure | **`98.0%`** Retention
-  - **Mean Final Alignment Error**: **`6.2°`**
-- **Range 2 ($40^\circ - 90^\circ$) Success Rate**: **`49.7%`** | Rotational Closure: **`60.6%`** | Grasp Retention: **`75.7%`**
+- **Purpose**: Ideal / Nominal Physics baseline.
+- **Conditions**: 
+  - Zero observation noise
+  - Zero perception / actuation latency
+  - Nominal silicone friction ($\mu = 3.0$)
+  - Nominal object masses and geometry
+- **Use Case**: Clean visual demonstration, video recordings, presentation figures, and nominal baseline benchmark.
 
 ---
 
-### 🎓 Live Presentation Demo for Professor
-To demonstrate the live in-hand manipulation in interactive 3D with the single green target arrow anchored to the object and 1.5-second firm hold lock-in:
+## 2. Sim-to-Real Domain Randomization Champion: `best_model.pth`
 
-```bash
-python3 in_hand_manipulation/evaluate.py \
-  --checkpoint best_model/best_model.pth \
-  --render \
-  --hold_time 1.5 \
-  --max_goals 1 \
-  --smooth_alpha 0.50 \
-  --episodes_per_range 3 \
-  --epsilon_ratio 0.10 \
-  --sample_mode shuffle
-```
+- **Purpose**: Real-World Deployment & Robust In-Hand Manipulation.
+- **Conditions (Active during Training & Benchmark)**:
+  - **ArUco Vision Latency**: 20 to 40 ms (1 to 2 control steps) + camera noise ($\pm 3\text{ mm}$, $\pm 1.1^\circ$ jitter)
+  - **CAN Bus Actuation Delay**: 0 to 20 ms (0 to 1 control steps)
+  - **Action Smoothing Filter**: Exponential low-pass filter ($\alpha = 0.70$) on 50 Hz control
+  - **Fingertip/Palm Silicone Friction**: $\mu \in [2.1, 3.9]$ ($\pm 30\%$ variation)
+  - **Object Physical Variations**: $\pm 30\%$ mass, friction, and geometry across Cylinder, Cube, and Cuboid
+  - **Privileged Physical Access**: Disabled (nominal observations only)
+- **Verified Benchmark Performance (@ Strict 10.0% Error Tolerance)**:
+  - **Overall Benchmark Score**: **`0.7122`**
+  - **Overall Success Rate**: **`62.5%`**
+  - **Overall Rotational Closure**: **`72.7%`**
+  - **Overall Pre-Goal Retention**: **`90.8%`** *(Drop rate down to only 9.2%)*
+  - **Range 1 ($10^\circ \text{ to } 40^\circ$ Small/Medium)**: **`73.3%` Success** | **`82.9%` Closure**
+  - **Range 2 ($40^\circ \text{ to } 90^\circ$ Large Gaiting)**: **`51.7%` Success** | **`62.5%` Closure**
+- **Last Updated**: 2026-10-15 22:53:34

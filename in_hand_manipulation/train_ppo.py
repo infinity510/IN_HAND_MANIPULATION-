@@ -81,7 +81,7 @@ class RewardWeights:
     w_progress: float = 14.0 # Angular progress weight: rewards active rotational progress toward target (d_theta_prev - d_theta)
     w_precision: float = 6.0 # Multi-scale exponential precision guidance reward weight
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
-    w_action_rate: float = 0.005 # Action rate penalty weight: penalizes high-frequency finger tremor ||a_t - a_{t-1}||^2 (curbs vibration without freezing motion)
+    w_action_rate: float = 0.035 # Action rate penalty weight: penalizes high-frequency finger tremor ||a_t - a_{t-1}||^2 (curbs vibration without freezing motion)
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
     w4: float = 100.0   # Terminal success bonus: large positive reward upon holding goal orientation
     w5: float = 80.0    # Catastrophic drop penalty: prevents suicide shortcut
@@ -92,9 +92,9 @@ class RewardWeights:
     w_angvel_brake: float = 0.50 # Object angular velocity braking penalty weight near target
     w_anti_stall: float = 0.25   # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50   # Precision grasp lock-in bonus weight for multi-point contact at goal
-    w_cradle_bonus: float = 0.40 # Palm cradle centering stability bonus to prevent cylindrical roll-slip
-    w_enclosure_bonus: float = 0.25 # Tri-finger grasp enclosure bonus (n_c >= 3) to stabilize curved surfaces
-    w_slip_penalty: float = 0.30 # Weak grasp single-contact slip penalty (n_c <= 1) during incomplete rotation
+    w_cradle_bonus: float = 0.55 # Palm cradle centering stability bonus to prevent cylindrical roll-slip
+    w_enclosure_bonus: float = 0.60 # Multi-finger grasp enclosure bonus (n_c >= 2) to stabilize gaiting transitions
+    w_slip_penalty: float = 0.45 # Weak grasp single-contact slip penalty (n_c <= 1) during incomplete rotation
     w_hold_bonus: float = 2.00   # Intrinsic hold stability bonus for keeping object stationary inside goal
     required_hold_steps: int = 15 # Required consecutive steps (0.75s) inside tolerance to achieve success
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
@@ -149,6 +149,10 @@ class PPOConfig:
     epsilon_ratio: float = 0.05      # Target orientation error threshold as ratio of initial angle (5% error)
     min_epsilon_ratio: float = 0.05  # Minimum threshold ratio floor (5% error)
     max_epsilon_ratio: float = 0.05  # Maximum threshold ratio ceiling (5% error)
+    tighten_schedule: bool = False   # Phased tolerance tightening schedule (e.g. 15% for 600 iters, then 10%)
+    phase1_iters: int = 600          # Number of iterations at Phase 1 tolerance
+    phase1_ratio: float = 0.15       # Tolerance ratio during Phase 1 (15%)
+    phase2_ratio: float = 0.10       # Tolerance ratio during Phase 2 (10%)
     curriculum_epsilon: bool = False # Kept strictly at 5% error tolerance for Stage 3
     min_epsilon: float = 0.015       # Minimum absolute floor in radians (~0.86 degrees)
     max_epsilon: float = 0.15        # Maximum absolute ceiling in radians
@@ -179,7 +183,9 @@ class PPOConfig:
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
     dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
     sim2real_dr: bool = False       # If True, enables full sim-to-real domain randomization
-    action_delay_max: int = 2       # Maximum action delay in steps (default: 2 steps = 40ms)
+    action_delay_max: int = 1       # Maximum action delay in steps (default: 1 step = 20ms)
+    vision_delay_max: int = 2       # Maximum ArUco vision delay in steps (default: 2 steps = 40ms camera+detection latency)
+    smooth_alpha: float = 0.70      # Exponential action smoothing alpha under sim-to-real (default: 0.70)
     obs_noise_scale: float = 1.0    # Observation noise scaling factor
     plateau_window: int = 2500      # Window of iterations without improvement to trigger plateau breaker
     plateau_breaker: bool = True    # If True, escalates difficulty upon 2500-iter plateau
@@ -214,7 +220,9 @@ class DeltoInHandManipulationEnv:
         bonus_steps_per_success: int = 150,
         max_steps_cap: int = 800,
         sim2real_dr: bool = False,
-        action_delay_max: int = 2,
+        action_delay_max: int = 1,
+        vision_delay_max: int = 2,
+        smooth_alpha: float = 0.70,
         obs_noise_scale: float = 1.0,
     ):
         if not os.path.exists(scene_xml_path):
@@ -235,12 +243,17 @@ class DeltoInHandManipulationEnv:
         self.min_goal_angle = float(min_goal_angle)
         self.max_goal_angle = float(max_goal_angle)
         
-        # Sim-to-Real Domain Randomization & Action Latency Setup
+        # Sim-to-Real Domain Randomization & Latency Setup
         self.sim2real_dr = sim2real_dr
         self.action_delay_max = action_delay_max
+        self.vision_delay_max = vision_delay_max
+        self.smooth_alpha = smooth_alpha
         self.obs_noise_scale = obs_noise_scale
         self.action_buffer = deque(maxlen=max(4, action_delay_max + 2))
+        self.vision_buffer = deque(maxlen=max(6, vision_delay_max + 2))
         self.active_action_delay = 0
+        self.active_vision_delay = 0
+        self.smoothed_action = None
         for _ in range(max(4, action_delay_max + 2)):
             self.action_buffer.append(np.zeros(12, dtype=np.float32))
 
@@ -353,13 +366,13 @@ class DeltoInHandManipulationEnv:
         max_angle = getattr(self, "max_goal_angle", 1.5708)
         
         # Stratified Mixture Curriculum Sampling:
-        # 65% small-to-medium anchor envelope (10° to 45° = 0.1745 to 0.7854 rad) to guarantee stable high-reward gradients
-        # 35% large gaiting frontier envelope (45° to 90° = 0.7854 to 1.5708 rad) to master multi-finger gaiting
-        if np.random.uniform(0.0, 1.0) < 0.65:
-            r_max = min(max_angle, 0.7854)
+        # 50% small-to-medium anchor envelope (10° to 40° = 0.1745 to 0.6981 rad)
+        # 50% large gaiting frontier envelope (40° to 90° = 0.6981 to 1.5708 rad) for Stage 2 mastery
+        if np.random.uniform(0.0, 1.0) < 0.50:
+            r_max = min(max_angle, 0.6981)
             angle = float(np.random.uniform(min_angle, max(min_angle, r_max)))
         else:
-            r_min = min(max_angle, 0.7854)
+            r_min = min(max_angle, 0.6981)
             angle = float(np.random.uniform(r_min, max_angle))
         rand_rot = transform.Rotation.from_rotvec(axis * angle)
         q_xyzw = rand_rot.as_quat()
@@ -437,9 +450,8 @@ class DeltoInHandManipulationEnv:
         if self.sim2real_dr:
             max_d = max(0, int(self.action_delay_max))
             self.active_action_delay = int(np.random.randint(0, max_d + 1))
-            self.action_buffer.clear()
-            for _ in range(max(4, max_d + 2)):
-                self.action_buffer.append(np.zeros(12, dtype=np.float32))
+            max_v = max(0, int(getattr(self, "vision_delay_max", 2)))
+            self.active_vision_delay = int(np.random.randint(1, max_v + 1)) if max_v > 0 else 0
                 
             # Randomize silicone fingertip and palm friction across episodes
             fric_mult = float(np.random.uniform(0.70, 1.30)) # [2.1 to 3.9 sliding friction]
@@ -507,11 +519,24 @@ class DeltoInHandManipulationEnv:
             
         # Initialize angular distance and previous action for differential reward terms
         obj_idx = self.model.jnt_qposadr[self.model.joint(f"obj_{self.active_object_id}_joint").id]
-        cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
+        cur_obj_pos = self.data.qpos[obj_idx:obj_idx+3].copy()
+        cur_obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].copy()
         self.prev_d_theta = self.compute_angular_distance(cur_obj_quat, self.target_quat)
         self.initial_d_theta = float(self.prev_d_theta)
         self.current_epsilon = max(self.reward_weights.min_abs_epsilon, self.reward_weights.epsilon_ratio * self.initial_d_theta)
-        self.prev_action = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
+        cur_qpos = np.array([self.data.qpos[self.model.jnt_qposadr[self.model.joint(j).id]] for j in self.joint_names], dtype=np.float32)
+        self.prev_action = cur_qpos.copy()
+
+        # Sim-to-Real Buffer & Action Smoother Initialization with true settled state
+        if self.sim2real_dr:
+            self.action_buffer.clear()
+            for _ in range(max(4, self.active_action_delay + 2)):
+                self.action_buffer.append(cur_qpos.copy())
+            self.smoothed_action = cur_qpos.copy()
+
+            self.vision_buffer.clear()
+            for _ in range(max(6, self.active_vision_delay + 2)):
+                self.vision_buffer.append((cur_obj_pos.copy(), cur_obj_quat.copy()))
         
         # Quadratic Angle-Dependent Episode Horizon:
         # Scales episode steps quadratically with required rotation angle:
@@ -549,6 +574,12 @@ class DeltoInHandManipulationEnv:
         obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].astype(np.float32)
         
         if self.sim2real_dr:
+            # (0) ArUco Vision Latency: 1-2 control steps (20-40 ms camera capture + pose estimation delay)
+            if self.active_vision_delay > 0 and len(self.vision_buffer) > self.active_vision_delay:
+                vis_pos, vis_quat = self.vision_buffer[-1 - self.active_vision_delay]
+                obj_pos = vis_pos.astype(np.float32)
+                obj_quat = vis_quat.astype(np.float32)
+
             # (a) Joint encoder noise: +-0.012 rad (~0.68 deg jitter)
             r_qpos = r_qpos + (self.obs_noise_scale * np.random.normal(0.0, 0.012, size=r_qpos.shape)).astype(np.float32)
             # (b) Joint velocity noise: +-0.04 rad/s (simulating finite difference encoder derivative noise)
@@ -615,9 +646,18 @@ class DeltoInHandManipulationEnv:
         """
         self.step_count += 1
         
-        # 1. Action Application with Safety Delta Clipping & Hardware Joint Limit Clamping
+        # 1. Action Application with Action Smoothing, Safety Delta Clipping & Joint Clamping
+        if self.sim2real_dr and self.smooth_alpha < 1.0:
+            if self.smoothed_action is None:
+                self.smoothed_action = action.copy()
+            else:
+                self.smoothed_action = (self.smooth_alpha * action + (1.0 - self.smooth_alpha) * self.smoothed_action).astype(np.float32)
+            target_action = self.smoothed_action
+        else:
+            target_action = action
+
         current_qpos = np.array([self.data.qpos[addr] for addr in self.jnt_qpos_addrs], dtype=np.float32)
-        delta_q = np.clip(action - current_qpos, -0.15, 0.15)
+        delta_q = np.clip(target_action - current_qpos, -0.15, 0.15)
         safe_action = np.clip(current_qpos + delta_q, self.safe_jnt_min, self.safe_jnt_max)
         
         # Sim-to-Real: Apply action transport delay buffer
@@ -641,6 +681,10 @@ class DeltoInHandManipulationEnv:
         obj_quat = self.data.qpos[obj_idx+3:obj_idx+7]
         post_qpos = np.array([self.data.qpos[addr] for addr in self.jnt_qpos_addrs], dtype=np.float32)
         r_qvel = np.array([self.data.qvel[self.model.jnt_dofadr[jid]] for jid in self.jnt_ids], dtype=np.float32)
+        
+        # Sim-to-Real: Append true object pose to vision buffer for delayed ArUco perception
+        if self.sim2real_dr:
+            self.vision_buffer.append((obj_pos.copy(), obj_quat.copy()))
         
         # 4. Compute Metrics for Reward Function
         w = self.reward_weights
@@ -964,6 +1008,14 @@ class DummyVecEnv:
         for env in self.envs:
             env.action_delay_max = int(delay)
 
+    def set_vision_delay_max(self, delay: int):
+        for env in self.envs:
+            env.vision_delay_max = int(delay)
+
+    def set_smooth_alpha(self, alpha: float):
+        for env in self.envs:
+            env.smooth_alpha = float(alpha)
+
     def close(self):
         for env in self.envs:
             env.close()
@@ -1026,6 +1078,12 @@ class SubprocVecEnv:
             elif cmd == "set_action_delay_max":
                 env.action_delay_max = int(data)
                 pipe.send(True)
+            elif cmd == "set_vision_delay_max":
+                env.vision_delay_max = int(data)
+                pipe.send(True)
+            elif cmd == "set_smooth_alpha":
+                env.smooth_alpha = float(data)
+                pipe.send(True)
             elif cmd == "close":
                 env.close()
                 pipe.close()
@@ -1085,6 +1143,18 @@ class SubprocVecEnv:
     def set_action_delay_max(self, delay: int):
         for p in self.pipes:
             p.send(("set_action_delay_max", int(delay)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_vision_delay_max(self, delay: int):
+        for p in self.pipes:
+            p.send(("set_vision_delay_max", int(delay)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_smooth_alpha(self, alpha: float):
+        for p in self.pipes:
+            p.send(("set_smooth_alpha", float(alpha)))
         for p in self.pipes:
             p.recv()
 
@@ -1447,7 +1517,11 @@ class PPOFineTuner:
         # 5. Instantiate MuJoCo Environment (Single-Process or Multi-Core Vectorized)
         is_init_warmup = (self.cfg.warmup_iterations > 0 and self.cfg.start_iteration <= self.cfg.warmup_iterations)
         init_goal_angle = (self.cfg.warmup_max_goal_angle if (is_init_warmup and self.cfg.warmup_max_goal_angle is not None) else self.cfg.max_goal_angle)
-        init_eps_ratio = (self.cfg.warmup_epsilon_ratio if (is_init_warmup and self.cfg.warmup_epsilon_ratio is not None) else self.cfg.epsilon_ratio)
+        if self.cfg.tighten_schedule:
+            init_eps_ratio = self.cfg.phase1_ratio
+            self.cfg.epsilon_ratio = self.cfg.phase1_ratio
+        else:
+            init_eps_ratio = (self.cfg.warmup_epsilon_ratio if (is_init_warmup and self.cfg.warmup_epsilon_ratio is not None) else self.cfg.epsilon_ratio)
         
         def make_env_fn():
             return DeltoInHandManipulationEnv(
@@ -1461,7 +1535,7 @@ class PPOFineTuner:
                     w1=self.cfg.w1,
                     w_progress=self.cfg.w_progress,
                     w_precision=self.cfg.w_precision,
-                    w_action_rate=self.cfg.w_action_rate,
+                    w_action_rate=getattr(self.cfg, 'w_action_rate', 0.035),
                     w4=self.cfg.w4,
                     w5=self.cfg.w5,
                     w6=getattr(self.cfg, 'w6', 0.0),
@@ -1471,9 +1545,9 @@ class PPOFineTuner:
                     w_angvel_brake=getattr(self.cfg, 'w_angvel_brake', 0.50),
                     w_anti_stall=getattr(self.cfg, 'w_anti_stall', 0.25),
                     w_lock_bonus=getattr(self.cfg, 'w_lock_bonus', 0.50),
-                    w_cradle_bonus=getattr(self.cfg, 'w_cradle_bonus', 0.40),
-                    w_enclosure_bonus=getattr(self.cfg, 'w_enclosure_bonus', 0.25),
-                    w_slip_penalty=getattr(self.cfg, 'w_slip_penalty', 0.30),
+                    w_cradle_bonus=getattr(self.cfg, 'w_cradle_bonus', 0.55),
+                    w_enclosure_bonus=getattr(self.cfg, 'w_enclosure_bonus', 0.60),
+                    w_slip_penalty=getattr(self.cfg, 'w_slip_penalty', 0.45),
                     w_hold_bonus=getattr(self.cfg, 'w_hold_bonus', 2.00),
                     required_hold_steps=getattr(self.cfg, 'required_hold_steps', 15),
                 ),
@@ -1486,7 +1560,9 @@ class PPOFineTuner:
                 bonus_steps_per_success=self.cfg.bonus_steps_per_success,
                 max_steps_cap=self.cfg.max_steps_cap,
                 sim2real_dr=getattr(self.cfg, 'sim2real_dr', False),
-                action_delay_max=getattr(self.cfg, 'action_delay_max', 2),
+                action_delay_max=getattr(self.cfg, 'action_delay_max', 1),
+                vision_delay_max=getattr(self.cfg, 'vision_delay_max', 2),
+                smooth_alpha=getattr(self.cfg, 'smooth_alpha', 0.70),
                 obs_noise_scale=getattr(self.cfg, 'obs_noise_scale', 1.0),
             )
             
@@ -1895,22 +1971,35 @@ class PPOFineTuner:
                     self.ep_lengths.fill(0)
                     obs = self.vec_env.reset()
 
-                # Dynamic Sim-to-Real Latency & Sensor Noise Curriculum
-                if getattr(self.cfg, 'sim2real_dr', False):
-                    if iteration <= 300:
-                        cur_delay_max = 1
-                        cur_noise = 0.25
-                    elif iteration <= 800:
-                        cur_delay_max = 1
-                        cur_noise = 0.50
+                # Phased Tolerance Tightening Curriculum Schedule
+                if self.cfg.tighten_schedule:
+                    rel_iter = iteration - self.cfg.start_iteration + 1
+                    if rel_iter <= self.cfg.phase1_iters:
+                        sched_ratio = self.cfg.phase1_ratio
                     else:
-                        cur_delay_max = min(2, getattr(self.cfg, 'action_delay_max', 2))
-                        cur_noise = min(1.0, getattr(self.cfg, 'obs_noise_scale', 0.80))
-                    
-                    if iteration in [self.cfg.start_iteration, 301, 801]:
+                        sched_ratio = self.cfg.phase2_ratio
+                        if rel_iter == self.cfg.phase1_iters + 1:
+                            print("\n" + "*"*75)
+                            print(f"[CURRICULUM ADVANCEMENT @ Iter {iteration}] Completed Phase 1 ({self.cfg.phase1_iters} iterations at {self.cfg.phase1_ratio*100:.1f}% tolerance).")
+                            print(f"Advancing to Phase 2: Tightened to Strict {self.cfg.phase2_ratio*100:.1f}% Error Tolerance!")
+                            print("*"*75 + "\n", flush=True)
+
+                    if abs(self.cfg.epsilon_ratio - sched_ratio) > 1e-5:
+                        self.cfg.epsilon_ratio = sched_ratio
+                        self.vec_env.set_epsilon_ratio(sched_ratio)
+
+                # Sim-to-Real Latency & Sensor Noise Configuration
+                if getattr(self.cfg, 'sim2real_dr', False):
+                    cur_delay_max = min(1, getattr(self.cfg, 'action_delay_max', 1))
+                    cur_vis_delay_max = min(2, getattr(self.cfg, 'vision_delay_max', 2))
+                    cur_noise = min(1.0, getattr(self.cfg, 'obs_noise_scale', 0.80))
+                    cur_smooth = getattr(self.cfg, 'smooth_alpha', 0.70)
+                    if iteration == self.cfg.start_iteration:
                         self.vec_env.set_action_delay_max(cur_delay_max)
+                        self.vec_env.set_vision_delay_max(cur_vis_delay_max)
                         self.vec_env.set_obs_noise_scale(cur_noise)
-                        print(f"\n[Sim2Real DR Curriculum @ Iter {iteration}] Latency Window: 0 to {cur_delay_max} steps (0 to {cur_delay_max*20}ms) | Sensor Noise Scale: {cur_noise:.2f}\n", flush=True)
+                        self.vec_env.set_smooth_alpha(cur_smooth)
+                        print(f"\n[Sim2Real DR Active @ Iter {iteration}] Actuation Latency: 0 to {cur_delay_max} steps ({cur_delay_max*20}ms) | ArUco Vision Latency: 1 to {cur_vis_delay_max} steps ({cur_vis_delay_max*20}ms) | Action Smooth Alpha: {cur_smooth:.2f} | Sensor Noise Scale: {cur_noise:.2f}\n", flush=True)
 
                 # Phase A: Trajectory Rollout Collection
                 obs, rollout_metrics = self.collect_rollouts(obs)
@@ -2181,10 +2270,14 @@ def parse_args():
     parser.add_argument("--target_max_goal_angle", type=float, default=1.5708, help="Target maximum goal angle in radians (default: 1.5708 rad = 90 deg)")
     parser.add_argument("--curriculum_epsilon", action="store_true", help="Enable adaptive curriculum")
     parser.add_argument("--curriculum_goal_angle", action="store_true", help="Enable adaptive curriculum on goal angle")
+    parser.add_argument("--tighten_schedule", action="store_true", help="Enable phased tolerance tightening schedule (15%% for N iterations, then 10%%)")
+    parser.add_argument("--phase1_iters", type=int, default=600, help="Number of iterations at phase 1 tolerance (default: 600)")
+    parser.add_argument("--phase1_ratio", type=float, default=0.15, help="Tolerance ratio during phase 1 (default: 0.15 = 15%%)")
+    parser.add_argument("--phase2_ratio", type=float, default=0.10, help="Tolerance ratio during phase 2 (default: 0.10 = 10%%)")
     parser.add_argument("--w1", type=float, default=2.5, help="Convex orientation closure reward weight (default: 2.5)")
     parser.add_argument("--w_progress", type=float, default=14.0, help="Accelerating angular progress reward weight (default: 14.0)")
     parser.add_argument("--w_precision", type=float, default=6.0, help="Multi-scale exponential precision guidance reward weight (default: 6.0)")
-    parser.add_argument("--w_action_rate", type=float, default=0.005, help="Action rate smoothing penalty weight (default: 0.005)")
+    parser.add_argument("--w_action_rate", type=float, default=0.035, help="Action rate smoothing penalty weight (default: 0.035)")
     parser.add_argument("--w4", type=float, default=50.0, help="Terminal success bonus weight (default: 50.0)")
     parser.add_argument("--w5", type=float, default=80.0, help="Early reset / drop penalty weight (default: 80.0)")
     parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
@@ -2194,17 +2287,19 @@ def parse_args():
     parser.add_argument("--w_angvel_brake", type=float, default=0.50, help="Object angular velocity braking weight near target (default: 0.50)")
     parser.add_argument("--w_anti_stall", type=float, default=0.25, help="Anti-stall penalty weight when stationary outside goal (default: 0.25)")
     parser.add_argument("--w_lock_bonus", type=float, default=0.50, help="Precision grasp lock-in bonus weight for multi-point contacts at goal (default: 0.50)")
-    parser.add_argument("--w_cradle_bonus", type=float, default=0.40, help="Palm cradle centering stability bonus (default: 0.40)")
-    parser.add_argument("--w_enclosure_bonus", type=float, default=0.25, help="Tri-finger grasp enclosure bonus (n_c >= 3) to stabilize curved surfaces (default: 0.25)")
-    parser.add_argument("--w_slip_penalty", type=float, default=0.30, help="Weak grasp single-contact slip penalty (n_c <= 1) (default: 0.30)")
+    parser.add_argument("--w_cradle_bonus", type=float, default=0.55, help="Palm cradle centering stability bonus (default: 0.55)")
+    parser.add_argument("--w_enclosure_bonus", type=float, default=0.60, help="Tri-finger grasp enclosure bonus (n_c >= 2) to stabilize curved surfaces (default: 0.60)")
+    parser.add_argument("--w_slip_penalty", type=float, default=0.45, help="Weak grasp single-contact slip penalty (n_c <= 1) (default: 0.45)")
     parser.add_argument("--w_hold_bonus", type=float, default=2.00, help="Hold stability bonus weight (default: 2.00)")
     parser.add_argument("--required_hold_steps", type=int, default=15, help="Consecutive steps in goal tolerance required for success (default: 15 = 0.75s)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30%% on mass, friction, size)")
-    parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization (action delay buffer, observation noise, silicone friction jitter)")
-    parser.add_argument("--action_delay_max", type=int, default=2, help="Max action delay in steps (default: 2 = 40ms)")
+    parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization (action delay buffer, vision latency, observation noise, silicone friction jitter)")
+    parser.add_argument("--action_delay_max", type=int, default=1, help="Max action delay in steps (default: 1 = 20ms)")
+    parser.add_argument("--vision_delay_max", type=int, default=2, help="Max ArUco vision delay in steps (default: 2 = 40ms camera capture + pose estimation latency)")
+    parser.add_argument("--smooth_alpha", type=float, default=0.70, help="Exponential action smoothing alpha (default: 0.70)")
     parser.add_argument("--obs_noise_scale", type=float, default=1.0, help="Observation noise scale factor")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
@@ -2274,6 +2369,10 @@ def main():
         epsilon_ratio=args.epsilon_ratio,
         min_epsilon_ratio=args.min_epsilon_ratio,
         max_epsilon_ratio=args.max_epsilon_ratio,
+        tighten_schedule=args.tighten_schedule,
+        phase1_iters=args.phase1_iters,
+        phase1_ratio=args.phase1_ratio,
+        phase2_ratio=args.phase2_ratio,
         curriculum_epsilon=args.curriculum_epsilon,
         min_epsilon=args.min_epsilon,
         max_epsilon=args.max_epsilon,
@@ -2305,6 +2404,8 @@ def main():
         dr_ratio=args.dr_ratio,
         sim2real_dr=args.sim2real_dr,
         action_delay_max=args.action_delay_max,
+        vision_delay_max=args.vision_delay_max,
+        smooth_alpha=args.smooth_alpha,
         obs_noise_scale=args.obs_noise_scale,
         plateau_window=args.plateau_window,
         plateau_breaker=not args.no_plateau_breaker,

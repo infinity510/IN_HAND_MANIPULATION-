@@ -1,7 +1,7 @@
 ======================================================================================
-IN-HAND MANIPULATION STRATIFIED BENCHMARK REPORT (@10.0% Error Tolerance)
-Checkpoint: /mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/fine_tune_training/stage3_eps05/ppo_latest_actor.pth
-Total Episodes Evaluated: 600
+IN-HAND MANIPULATION STRATIFIED BENCHMARK REPORT (@5.0% Error Tolerance)
+Checkpoint: best_model/best_model.pth
+Total Episodes Evaluated: 900
 ======================================================================================
 
 ######################################################################################
@@ -9,40 +9,40 @@ SECTION 1: RANGE 1 (10.0° to 40.0° Small-to-Medium Rotations)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 100      |   40.0%  |   52.1%  |   82.0%  |   18.0%  |   39.0%  |  56.5°     | 335.3
-Cube         | 100      |   32.0%  |   54.1%  |   99.0%  |    1.0%  |    4.0%  |  19.8°     | 369.2
-Cuboid       | 100      |   42.0%  |   62.0%  |   96.0%  |    4.0%  |   11.0%  |  27.3°     | 386.9
+Cylinder     | 150      |   24.7%  |   38.9%  |   68.7%  |   31.3%  |   47.3%  |  64.4°     | 319.7
+Cube         | 150      |   58.0%  |   81.5%  |   96.7%  |    3.3%  |   19.3%  |  25.5°     | 352.0
+Cuboid       | 150      |   79.3%  |   94.4%  |  100.0%  |    0.0%  |   20.0%  |  24.0°     | 347.6
 ---------------------------------------------------------------------------------------------------------
-RANGE 1 TOTAL | 300      |   38.0%  |   56.1%  |   92.3%  |    7.7%  |   18.0%  |  34.5°     | 363.8
-  --> Range 1 Effective Manipulation Index (EMI): 0.5180 | Benchmark Score: 0.5430
+RANGE 1 TOTAL | 450      |   54.0%  |   71.6%  |   88.4%  |   11.6%  |   28.9%  |  38.0°     | 339.7
+  --> Range 1 Effective Manipulation Index (EMI): 0.6332 | Benchmark Score: 0.6617
 
 ######################################################################################
 SECTION 2: RANGE 2 (40.0° to 90.0° Large-Angle In-Hand Gaiting)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 100      |    7.0%  |   18.8%  |   40.0%  |   60.0%  |   65.0%  |  87.6°     | 430.1
-Cube         | 100      |   15.0%  |   38.2%  |   78.0%  |   22.0%  |   26.0%  |  52.1°     | 603.5
-Cuboid       | 100      |   33.0%  |   58.6%  |   77.0%  |   23.0%  |   37.0%  |  53.3°     | 540.1
+Cylinder     | 150      |    2.7%  |    7.0%  |   20.0%  |   80.0%  |   82.7%  | 104.8°     | 339.7
+Cube         | 150      |   26.7%  |   43.2%  |   70.7%  |   29.3%  |   40.0%  |  55.2°     | 505.0
+Cuboid       | 150      |   36.0%  |   49.9%  |   61.3%  |   38.7%  |   54.7%  |  56.0°     | 416.2
 ---------------------------------------------------------------------------------------------------------
-RANGE 2 TOTAL | 300      |   18.3%  |   38.5%  |   65.0%  |   35.0%  |   42.7%  |  64.3°     | 524.6
-  --> Range 2 Effective Manipulation Index (EMI): 0.2504 | Benchmark Score: 0.3372
+RANGE 2 TOTAL | 450      |   21.8%  |   33.3%  |   50.7%  |   49.3%  |   59.1%  |  72.0°     | 420.3
+  --> Range 2 Effective Manipulation Index (EMI): 0.1689 | Benchmark Score: 0.3102
 
 ======================================================================================
 SECTION 3: GRAND COMPOSITE VERIFICATION SUMMARY (FULL 10° TO 90° ENVELOPE)
 ======================================================================================
 Evaluation Metric                   | Range 1 (10°-40°)    | Range 2 (40°-90°)    | Grand Total    
 ------------------------------------------------------------------------------------------------
-Total Evaluated Episodes            | 300                  | 300                  | 600            
-Success Rate (@10% Error)           | 38.0               % | 18.3               % | 28.2          %
-Mean Rotational Closure             | 56.1               % | 38.5               % | 47.3          %
-Pre-Goal Retention Rate             | 92.3               % | 65.0               % | 78.7          %
-Pre-Goal Drop Rate                  | 7.7                % | 35.0               % | 21.3          %
-Raw Drop Rate (All Steps)           | 18.0               % | 42.7               % | 30.3          %
-Mean Final Geodesic Error           | 34.5               ° | 64.3               ° | 49.4          °
-Mean Steps per Episode              | 363.8                | 524.6                | 444.2          
-Peak Hardware Torque                | 5.93             N·m | 6.28             N·m | 6.28        N·m
-Effective Manipulation Index (EMI)  | 0.5180               | 0.2504               | 0.3722         
-Composite Benchmark Score           | 0.5430               | 0.3372               | 0.4401         
+Total Evaluated Episodes            | 450                  | 450                  | 900            
+Success Rate (@10% Error)           | 54.0               % | 21.8               % | 37.9          %
+Mean Rotational Closure             | 71.6               % | 33.3               % | 52.5          %
+Pre-Goal Retention Rate             | 88.4               % | 50.7               % | 69.6          %
+Pre-Goal Drop Rate                  | 11.6               % | 49.3               % | 30.4          %
+Raw Drop Rate (All Steps)           | 28.9               % | 59.1               % | 44.0          %
+Mean Final Geodesic Error           | 38.0               ° | 72.0               ° | 55.0          °
+Mean Steps per Episode              | 339.7                | 420.3                | 380.0          
+Peak Hardware Torque                | 5.43             N·m | 6.01             N·m | 6.01        N·m
+Effective Manipulation Index (EMI)  | 0.6332               | 0.1689               | 0.3649         
+Composite Benchmark Score           | 0.6617               | 0.3102               | 0.4859         
 ================================================================================================
 

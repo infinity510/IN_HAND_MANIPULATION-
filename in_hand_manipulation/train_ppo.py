@@ -92,6 +92,8 @@ class RewardWeights:
     w_anti_stall: float = 0.25   # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50   # Precision grasp lock-in bonus weight for multi-point contact at goal
     w_cradle_bonus: float = 0.40 # Palm cradle centering stability bonus to prevent cylindrical roll-slip
+    w_enclosure_bonus: float = 0.25 # Tri-finger grasp enclosure bonus (n_c >= 3) to stabilize curved surfaces
+    w_slip_penalty: float = 0.30 # Weak grasp single-contact slip penalty (n_c <= 1) during incomplete rotation
     epsilon: float = 0.35           # Fallback absolute epsilon in radians (~20.0 degrees)
     epsilon_ratio: float = 0.20     # Target orientation error threshold as ratio of initial angle (e.g. 0.20 = 20%)
     min_abs_epsilon: float = 0.015  # Minimum absolute epsilon floor in radians (~0.86 degrees)
@@ -165,6 +167,8 @@ class PPOConfig:
     w_anti_stall: float = 0.25       # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50       # Precision grasp lock-in bonus weight for multi-point contact at goal
     w_cradle_bonus: float = 0.40     # Palm cradle centering stability bonus
+    w_enclosure_bonus: float = 0.25  # Tri-finger grasp enclosure bonus (n_c >= 3)
+    w_slip_penalty: float = 0.30     # Weak grasp single-contact slip penalty (n_c <= 1)
     save_freq: int = 100             # Periodic milestone checkpoint frequency
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
@@ -379,17 +383,17 @@ class DeltoInHandManipulationEnv:
         # 1. Reset Gripper Joints
         self.reset_gripper_pose()
         
-        # 2. Select Active Object (Gentle Balanced Sampling: each object receives 28% - 38%)
+        # 2. Select Active Object (Adaptive Hard-Negative Sampling: struggling objects receive up to 55%)
         if object_id is None:
             fails = np.array([
                 1.0 - (self.object_performance[k][0] / max(1, self.object_performance[k][1]))
                 for k in [1, 2, 3]
             ], dtype=np.float32)
-            w = np.exp(0.3 * fails)
+            w = np.exp(0.8 * fails)
             p = w / w.sum()
-            # Gentle balance: ensure each object gets between 28% and 38% practice,
-            # giving slightly more focus to struggling objects without starving the others or drowning in slip
-            p = np.clip(p, 0.28, 0.38)
+            # Adaptive hard-negative focus: struggling objects (Cylinder) receive up to 55% practice
+            # while mastered objects (Cuboid at ~80% succ) maintain skills at 15-20%
+            p = np.clip(p, 0.15, 0.55)
             p = p / p.sum()
             self.active_object_id = int(np.random.choice([1, 2, 3], p=p))
         else:
@@ -659,6 +663,18 @@ class DeltoInHandManipulationEnv:
         w_lock = getattr(w, 'w_lock_bonus', 0.50)
         lock_bonus = w_lock * min(n_c, 4) * float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
         
+        # (e2) Multi-Finger Tri-Grasp Enclosure Bonus:
+        # Rewards maintaining simultaneous 3-finger contact support (n_c >= 3) throughout active manipulation,
+        # providing the physical constraint necessary to prevent curved cylindrical surfaces from slipping or spinning out.
+        w_enc = getattr(w, 'w_enclosure_bonus', 0.25)
+        enclosure_bonus = w_enc * float(min(n_c, 3) / 3.0) if (dist_to_palm <= w.drop_threshold and obj_pos[2] >= w.min_height_threshold) else 0.0
+        
+        # (e3) Weak Grasp / Single-Contact Slip Penalty:
+        # Penalizes dangerous under-constrained grasps (n_c <= 1) during incomplete rotation,
+        # preventing the squeeze-out drop failure mode characteristic of cylinders.
+        w_slip = getattr(w, 'w_slip_penalty', 0.30)
+        slip_penalty = w_slip if (n_c <= 1 and dist_to_palm <= w.drop_threshold and obj_pos[2] >= w.min_height_threshold and rel_error > w.epsilon_ratio) else 0.0
+        
         # 5. Evaluate Indicator Functions & Continuous Goal Resampling
         is_success_this_step = bool(d_theta < self.current_epsilon)
         is_dropped = bool(dist_to_palm > w.drop_threshold or obj_pos[2] < w.min_height_threshold)
@@ -704,6 +720,8 @@ class DeltoInHandManipulationEnv:
             + alive_reward
             + lock_bonus
             + cradle_bonus
+            + enclosure_bonus
+            - slip_penalty
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
@@ -1329,6 +1347,8 @@ class PPOFineTuner:
                     w_anti_stall=getattr(self.cfg, 'w_anti_stall', 0.25),
                     w_lock_bonus=getattr(self.cfg, 'w_lock_bonus', 0.50),
                     w_cradle_bonus=getattr(self.cfg, 'w_cradle_bonus', 0.40),
+                    w_enclosure_bonus=getattr(self.cfg, 'w_enclosure_bonus', 0.25),
+                    w_slip_penalty=getattr(self.cfg, 'w_slip_penalty', 0.30),
                 ),
                 max_episode_steps=self.cfg.max_episode_steps,
                 render_mode=self.cfg.render if self.cfg.num_envs == 1 else False,
@@ -2025,6 +2045,8 @@ def parse_args():
     parser.add_argument("--w_anti_stall", type=float, default=0.25, help="Anti-stall penalty weight when stationary outside goal (default: 0.25)")
     parser.add_argument("--w_lock_bonus", type=float, default=0.50, help="Precision grasp lock-in bonus weight for multi-point contacts at goal (default: 0.50)")
     parser.add_argument("--w_cradle_bonus", type=float, default=0.40, help="Palm cradle centering stability bonus (default: 0.40)")
+    parser.add_argument("--w_enclosure_bonus", type=float, default=0.25, help="Tri-finger grasp enclosure bonus (n_c >= 3) to stabilize curved surfaces (default: 0.25)")
+    parser.add_argument("--w_slip_penalty", type=float, default=0.30, help="Weak grasp single-contact slip penalty (n_c <= 1) (default: 0.30)")
     parser.add_argument("--steps_per_radian", type=int, default=200, help="Additional episode steps granted per radian of target rotation (default: 200)")
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
@@ -2118,6 +2140,8 @@ def main():
         w_anti_stall=args.w_anti_stall,
         w_lock_bonus=args.w_lock_bonus,
         w_cradle_bonus=args.w_cradle_bonus,
+        w_enclosure_bonus=args.w_enclosure_bonus,
+        w_slip_penalty=args.w_slip_penalty,
         save_freq=args.save_freq,
         render=args.render,
         show_actions=args.show_actions,

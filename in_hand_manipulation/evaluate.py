@@ -260,6 +260,8 @@ def run_rendered_evaluation(
                     truncated = False
                     step_info = {}
                     peak_torque = 0.0
+                    last_goals_count = 0
+                    held_at_goal = False
 
                     while not (terminated or truncated) and viewer.is_running():
                         step += 1

@@ -354,7 +354,7 @@ def run_rendered_evaluation(
 
                 print(
                     f"[{r_name}] Ep {ep_num:02d}/{len(episodes)} | Object: {obj_name:<8} | "
-                    f"Target Angle: {init_angle_deg:.1f}° | Epsilon: {env.epsilon:.3f} rad ({tol_deg:.1f}°)"
+                    f"Target Angle: {init_angle_deg:.1f}° | Epsilon: {env.current_epsilon:.3f} rad ({tol_deg:.1f}°)"
                 )
 
                 while not (terminated or truncated) and viewer.is_running():

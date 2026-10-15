@@ -1689,3 +1689,35 @@ Integrated dynamic object sampling in `in_hand_manipulation/evaluate.py`:
    - Retains the grouped sequence for backwards compatibility.
 4. **Reproducibility**: Supports `--seed <int>` to ensure identical randomized sequences when required for rigorous comparative ablation.
 
+---
+
+## 48. Sim-to-Real Domain Randomization & Sub-Tolerance Super-Precision Architecture
+
+### 1. The Sim-to-Real Gap Reality Check
+Direct zero-shot transfer from simulation to the physical Delto hand fails due to four primary physical disparities:
+1. **Actuation & Transport Latency**: USB/CAN bus communication, microcontroller cycle times, and servo motor response introduce $20\text{--}40\text{ ms}$ of unmodeled lag.
+2. **State Estimation Noise**: Ground-truth MuJoCo coordinates are replaced on hardware by optical tracking or RGB-D pose estimators with position jitter ($\pm 3\text{ mm}$), orientation noise ($\pm 1.1^\circ$), and encoder velocity derivative noise ($\pm 0.04\text{ rad/s}$).
+3. **Privileged Information Trap**: In basic simulation, feeding ground-truth physical parameters (exact mass, size, friction) allows the policy to "cheat", failing when real-world parameters are unknown.
+4. **Silicone Contact Variation**: Real silicone pads accumulate dust, wear down, and vary in friction ($\mu \approx 2.1\text{--}3.9$).
+
+### 2. Engineering Solution: Drop-In Sim-to-Real Domain Randomization
+Integrated into `DeltoInHandManipulationEnv` (`in_hand_manipulation/train_ppo.py`):
+- **Action Delay Buffer (`--action_delay_max 2`)**: FIFO queue randomizing setpoint latency across $1\text{--}2$ timesteps ($20\text{--}40\text{ ms}$ at $50\text{ Hz}$).
+- **Sensor Observation Noise**:
+  - Joint positions: $\mathcal{N}(0, 0.012^2)$ radians.
+  - Joint velocities: $\mathcal{N}(0, 0.04^2)$ rad/s.
+  - Object 3D position: $\mathcal{N}(0, 0.003^2)$ meters.
+  - Object 3D quaternion: $\mathcal{N}(0, 0.02^2)$ axis-angle perturbation.
+- **Non-Privileged Observation**: Feeds nominal physical parameters in `obs` during training so the policy learns robust closed-loop tactile compliance rather than over-fitting to exact simulation constants.
+- **Dynamic Silicone Friction Randomization**: Randomizes fingertip and palm friction across $[0.70, 1.30] \times$ nominal baseline per episode.
+
+### 3. Progressive Sub-Tolerance Super-Precision Reward
+To actively encourage driving orientation error below the $10\%$ tolerance threshold towards $5\%$ and $0\%$, formulated a progressive super-precision reward in `step()`:
+$$\Delta r_{\text{super\_precision}} = 8.0 \cdot \left(\frac{\epsilon_{\text{ratio}} - \text{rel\_error}}{\epsilon_{\text{ratio}}}\right)^{1.5} \quad \text{for } \text{rel\_error} < \epsilon_{\text{ratio}}$$
+- At $10\%$ error: $\Delta r = +0.0$
+- At $5\%$ error: $\Delta r = +2.83$ per step
+- At $2\%$ error: $\Delta r = +5.72$ per step
+- At $0\%$ error: $\Delta r = +8.00$ per step
+Ensures the policy qualifies for goal achievement at $10\%$ error while generating strong reinforcement gradients to minimize residual angular error to the theoretical limit.
+
+

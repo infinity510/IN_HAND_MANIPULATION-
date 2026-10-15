@@ -178,6 +178,9 @@ class PPOConfig:
     render: bool = False            # If True, opens live interactive 3D MuJoCo viewer during training
     show_actions: bool = False      # If True, prints numerical action telemetry during rollouts
     dr_ratio: float = 0.30          # Domain randomization ratio (+-30% on mass, friction, and sizes)
+    sim2real_dr: bool = False       # If True, enables full sim-to-real domain randomization
+    action_delay_max: int = 2       # Maximum action delay in steps (default: 2 steps = 40ms)
+    obs_noise_scale: float = 1.0    # Observation noise scaling factor
     plateau_window: int = 2500      # Window of iterations without improvement to trigger plateau breaker
     plateau_breaker: bool = True    # If True, escalates difficulty upon 2500-iter plateau
     target_accuracy: float = 0.70   # Target benchmark success rate (70%)
@@ -210,6 +213,9 @@ class DeltoInHandManipulationEnv:
         steps_per_radian: int = 200,
         bonus_steps_per_success: int = 150,
         max_steps_cap: int = 800,
+        sim2real_dr: bool = False,
+        action_delay_max: int = 2,
+        obs_noise_scale: float = 1.0,
     ):
         if not os.path.exists(scene_xml_path):
             raise FileNotFoundError(f"MuJoCo XML scene not found at {scene_xml_path}")
@@ -229,6 +235,15 @@ class DeltoInHandManipulationEnv:
         self.min_goal_angle = float(min_goal_angle)
         self.max_goal_angle = float(max_goal_angle)
         
+        # Sim-to-Real Domain Randomization & Action Latency Setup
+        self.sim2real_dr = sim2real_dr
+        self.action_delay_max = action_delay_max
+        self.obs_noise_scale = obs_noise_scale
+        self.action_buffer = deque(maxlen=action_delay_max + 1)
+        self.active_action_delay = 1
+        for _ in range(action_delay_max + 1):
+            self.action_buffer.append(np.zeros(12, dtype=np.float32))
+
         # Domain Randomization Setup (+-30% on mass, friction, and size)
         self.dr_ratio = dr_ratio
         self.nominal_obj_props = {}
@@ -418,6 +433,21 @@ class DeltoInHandManipulationEnv:
         else:
             self.active_object_id = int(object_id)
             
+        # Sim-to-Real: Randomize latency delay & silicone fingertip friction per episode
+        if self.sim2real_dr:
+            self.active_action_delay = int(np.random.randint(1, self.action_delay_max + 1))
+            self.action_buffer.clear()
+            for _ in range(self.action_delay_max + 1):
+                self.action_buffer.append(np.zeros(12, dtype=np.float32))
+                
+            # Randomize silicone fingertip and palm friction across episodes
+            fric_mult = float(np.random.uniform(0.70, 1.30)) # [2.1 to 3.9 sliding friction]
+            for g_id in range(self.model.ngeom):
+                g_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, g_id)
+                if g_name and ("fingertip" in g_name or "palm" in g_name):
+                    self.model.geom_friction[g_id, 0] = 3.0 * fric_mult
+                    self.model.geom_friction[g_id, 1] = 0.05 * fric_mult
+
         # 3. Apply Domain Randomization (+-30% on mass, friction, and size)
         props = self.nominal_obj_props[self.active_object_id]
         body_id = props["body_id"]
@@ -517,8 +547,26 @@ class DeltoInHandManipulationEnv:
         obj_pos = self.data.qpos[obj_idx:obj_idx+3].astype(np.float32)
         obj_quat = self.data.qpos[obj_idx+3:obj_idx+7].astype(np.float32)
         
-        # Injects the randomized physical parameters into observation state
-        obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, self.current_phys_params], axis=0)
+        if self.sim2real_dr:
+            # (a) Joint encoder noise: +-0.012 rad (~0.68 deg jitter)
+            r_qpos = r_qpos + (self.obs_noise_scale * np.random.normal(0.0, 0.012, size=r_qpos.shape)).astype(np.float32)
+            # (b) Joint velocity noise: +-0.04 rad/s (simulating finite difference encoder derivative noise)
+            r_qvel = r_qvel + (self.obs_noise_scale * np.random.normal(0.0, 0.04, size=r_qvel.shape)).astype(np.float32)
+            # (c) Vision object position jitter: +-0.003 m (3mm camera noise)
+            obj_pos = obj_pos + (self.obs_noise_scale * np.random.normal(0.0, 0.003, size=obj_pos.shape)).astype(np.float32)
+            # (d) Vision object quaternion jitter: +-0.02 rad (~1.1 deg orientation noise)
+            q_noise_rot = transform.Rotation.from_rotvec(self.obs_noise_scale * np.random.normal(0.0, 0.02, size=3))
+            cur_r = transform.Rotation.from_quat([obj_quat[1], obj_quat[2], obj_quat[3], obj_quat[0]])
+            noisy_r = q_noise_rot * cur_r
+            q_noisy_xyzw = noisy_r.as_quat()
+            obj_quat = np.array([q_noisy_xyzw[3], q_noisy_xyzw[0], q_noisy_xyzw[1], q_noisy_xyzw[2]], dtype=np.float32)
+            # (e) Non-privileged phys_params: Provide nominal params so policy does not overfit to privileged ground-truth sim values
+            obs_phys = self.nominal_obj_props[self.active_object_id]["phys_params"].copy()
+        else:
+            obs_phys = self.current_phys_params
+
+        # Injects the physical parameters into observation state
+        obs_raw = np.concatenate([r_qpos, r_qvel, obj_pos, obj_quat, self.target_quat, obs_phys], axis=0)
         
         # Apply observation normalization from BC pretraining: (s - mean) / std with outlier clipping
         obs_norm = (obs_raw - self.obs_mean) / (self.obs_std + 1e-8)
@@ -571,9 +619,16 @@ class DeltoInHandManipulationEnv:
         delta_q = np.clip(action - current_qpos, -0.15, 0.15)
         safe_action = np.clip(current_qpos + delta_q, self.safe_jnt_min, self.safe_jnt_max)
         
+        # Sim-to-Real: Apply action transport delay buffer
+        if self.sim2real_dr:
+            self.action_buffer.append(safe_action.copy())
+            applied_action = self.action_buffer[-1 - self.active_action_delay]
+        else:
+            applied_action = safe_action
+
         for i, aid in enumerate(self.actuator_ids):
             if aid != -1:
-                self.data.ctrl[aid] = safe_action[i]
+                self.data.ctrl[aid] = applied_action[i]
                 
         # 2. Step MuJoCo Physics (substeps * dt)
         for _ in range(self.substeps):
@@ -620,7 +675,17 @@ class DeltoInHandManipulationEnv:
         rel_error = float(d_theta / (self.initial_d_theta + 1e-6))
         wide_funnel = float(np.exp(- min(4.0, rel_error / 0.15)))
         tight_core = float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
-        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core
+        
+        # Progressive Sub-Tolerance Super-Precision Reward:
+        # When orientation error successfully drops below epsilon_ratio (e.g. 10%),
+        # grant an escalating precision bonus as the hand drives error down further towards 5% and 0%!
+        if rel_error < w.epsilon_ratio:
+            further_reduction = float((w.epsilon_ratio - rel_error) / (w.epsilon_ratio + 1e-6))
+            sub_tol_bonus = 8.0 * (further_reduction ** 1.5)
+        else:
+            sub_tol_bonus = 0.0
+
+        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core + sub_tol_bonus
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -1393,6 +1458,9 @@ class PPOFineTuner:
                 steps_per_radian=self.cfg.steps_per_radian,
                 bonus_steps_per_success=self.cfg.bonus_steps_per_success,
                 max_steps_cap=self.cfg.max_steps_cap,
+                sim2real_dr=getattr(self.cfg, 'sim2real_dr', False),
+                action_delay_max=getattr(self.cfg, 'action_delay_max', 2),
+                obs_noise_scale=getattr(self.cfg, 'obs_noise_scale', 1.0),
             )
             
         if self.cfg.num_envs == 1:
@@ -2091,6 +2159,9 @@ def parse_args():
     parser.add_argument("--bonus_steps_per_success", type=int, default=150, help="Additional episode steps granted per goal reached (default: 150, OpenAI Dactyl)")
     parser.add_argument("--max_steps_cap", type=int, default=800, help="Maximum episode horizon ceiling in steps (default: 800)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (+-30%% on mass, friction, size)")
+    parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization (action delay buffer, observation noise, silicone friction jitter)")
+    parser.add_argument("--action_delay_max", type=int, default=2, help="Max action delay in steps (default: 2 = 40ms)")
+    parser.add_argument("--obs_noise_scale", type=float, default=1.0, help="Observation noise scale factor")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")
     parser.add_argument("--checkpoint", type=str, default="", help="Path to checkpoint")
@@ -2188,6 +2259,9 @@ def main():
         render=args.render,
         show_actions=args.show_actions,
         dr_ratio=args.dr_ratio,
+        sim2real_dr=args.sim2real_dr,
+        action_delay_max=args.action_delay_max,
+        obs_noise_scale=args.obs_noise_scale,
         plateau_window=args.plateau_window,
         plateau_breaker=not args.no_plateau_breaker,
         target_accuracy=args.target_accuracy,

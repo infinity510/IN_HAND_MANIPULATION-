@@ -239,9 +239,9 @@ class DeltoInHandManipulationEnv:
         self.sim2real_dr = sim2real_dr
         self.action_delay_max = action_delay_max
         self.obs_noise_scale = obs_noise_scale
-        self.action_buffer = deque(maxlen=action_delay_max + 1)
-        self.active_action_delay = 1
-        for _ in range(action_delay_max + 1):
+        self.action_buffer = deque(maxlen=max(4, action_delay_max + 2))
+        self.active_action_delay = 0
+        for _ in range(max(4, action_delay_max + 2)):
             self.action_buffer.append(np.zeros(12, dtype=np.float32))
 
         # Domain Randomization Setup (+-30% on mass, friction, and size)
@@ -435,9 +435,10 @@ class DeltoInHandManipulationEnv:
             
         # Sim-to-Real: Randomize latency delay & silicone fingertip friction per episode
         if self.sim2real_dr:
-            self.active_action_delay = int(np.random.randint(1, self.action_delay_max + 1))
+            max_d = max(0, int(self.action_delay_max))
+            self.active_action_delay = int(np.random.randint(0, max_d + 1))
             self.action_buffer.clear()
-            for _ in range(self.action_delay_max + 1):
+            for _ in range(max(4, max_d + 2)):
                 self.action_buffer.append(np.zeros(12, dtype=np.float32))
                 
             # Randomize silicone fingertip and palm friction across episodes
@@ -955,6 +956,14 @@ class DummyVecEnv:
         for env in self.envs:
             env.set_min_goal_angle(float(min_angle))
 
+    def set_obs_noise_scale(self, scale: float):
+        for env in self.envs:
+            env.obs_noise_scale = float(scale)
+
+    def set_action_delay_max(self, delay: int):
+        for env in self.envs:
+            env.action_delay_max = int(delay)
+
     def close(self):
         for env in self.envs:
             env.close()
@@ -1011,6 +1020,12 @@ class SubprocVecEnv:
             elif cmd == "set_min_goal_angle":
                 env.set_min_goal_angle(float(data))
                 pipe.send(True)
+            elif cmd == "set_obs_noise_scale":
+                env.obs_noise_scale = float(data)
+                pipe.send(True)
+            elif cmd == "set_action_delay_max":
+                env.action_delay_max = int(data)
+                pipe.send(True)
             elif cmd == "close":
                 env.close()
                 pipe.close()
@@ -1058,6 +1073,18 @@ class SubprocVecEnv:
     def set_min_goal_angle(self, min_angle: float):
         for p in self.pipes:
             p.send(("set_min_goal_angle", float(min_angle)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_obs_noise_scale(self, scale: float):
+        for p in self.pipes:
+            p.send(("set_obs_noise_scale", float(scale)))
+        for p in self.pipes:
+            p.recv()
+
+    def set_action_delay_max(self, delay: int):
+        for p in self.pipes:
+            p.send(("set_action_delay_max", int(delay)))
         for p in self.pipes:
             p.recv()
 
@@ -1867,7 +1894,24 @@ class PPOFineTuner:
                     self.ep_returns.fill(0.0)
                     self.ep_lengths.fill(0)
                     obs = self.vec_env.reset()
-                
+
+                # Dynamic Sim-to-Real Latency & Sensor Noise Curriculum
+                if getattr(self.cfg, 'sim2real_dr', False):
+                    if iteration <= 300:
+                        cur_delay_max = 1
+                        cur_noise = 0.25
+                    elif iteration <= 800:
+                        cur_delay_max = 1
+                        cur_noise = 0.50
+                    else:
+                        cur_delay_max = min(2, getattr(self.cfg, 'action_delay_max', 2))
+                        cur_noise = min(1.0, getattr(self.cfg, 'obs_noise_scale', 0.80))
+                    
+                    if iteration in [self.cfg.start_iteration, 301, 801]:
+                        self.vec_env.set_action_delay_max(cur_delay_max)
+                        self.vec_env.set_obs_noise_scale(cur_noise)
+                        print(f"\n[Sim2Real DR Curriculum @ Iter {iteration}] Latency Window: 0 to {cur_delay_max} steps (0 to {cur_delay_max*20}ms) | Sensor Noise Scale: {cur_noise:.2f}\n", flush=True)
+
                 # Phase A: Trajectory Rollout Collection
                 obs, rollout_metrics = self.collect_rollouts(obs)
                 

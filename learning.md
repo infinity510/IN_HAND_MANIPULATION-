@@ -1720,4 +1720,43 @@ $$\Delta r_{\text{super\_precision}} = 8.0 \cdot \left(\frac{\epsilon_{\text{rat
 - At $0\%$ error: $\Delta r = +8.00$ per step
 Ensures the policy qualifies for goal achievement at $10\%$ error while generating strong reinforcement gradients to minimize residual angular error to the theoretical limit.
 
+---
+
+## 49. Breaking the Sim-to-Real "Cold Turkey" Degradation Trap: Curricular Latency & Rebalanced Incentives
+
+### 1. Empirical Observation: The Iteration 1000 Degradation
+During early Stage 4 training under full Sim-to-Real Domain Randomization ($20\text{--}40\text{ ms}$ action delay, full sensor jitter, $10\%$ error tolerance), performance initially surged to a benchmark score of **`0.7333`** at Iteration 100 ($67.5\%$ overall success, $95.0\%$ Range 1 success), but then steadily degraded:
+- **Iteration 100**: Score `0.7333` | Success: `67.5%` | Mean Steps: `197.2`
+- **Iteration 400**: Score `0.7153` | Success: `64.2%` | Mean Steps: `220.5`
+- **Iteration 800**: Score `0.6135` | Success: `50.8%` | Mean Steps: `295.1`
+- **Iteration 1000**: Score `0.5872` | Success: `46.7%` | Mean Steps: `333.3`
+
+### 2. Forensic Diagnosis: The Three Root Causes
+1. **The "Cold Turkey" Latency Shock**:
+   - Applying $40\text{ ms}$ delay and full observation noise simultaneously on an unadapted policy pushed the training drop rate to $95\%$.
+2. **The Drop-Penalty Defensive Basin**:
+   - With $w_5 = 80.0$ drop penalty, any drop completely wiped out cumulative progress rewards. Facing $95\%$ drops, PPO gradients prioritized *drop minimization* over *rotational progress*.
+   - The policy learned to hesitate, slow down actuation, and cling passively to the object rather than actively gaiting, inflating episode lengths to $333+$ steps and causing timeout failures.
+3. **Exploration Entropy Collapse**:
+   - The Gaussian policy log-std collapsed to $-2.67$ ($\sigma \approx 3.9^\circ$) with an entropy coefficient of $0.0003$. Exploration noise vanished, locking the policy into this conservative sub-optimal basin.
+
+### 3. Engineering Solution: Progressive Curricular Sim-to-Real Architecture
+Implemented in `in_hand_manipulation/train_ppo.py`:
+1. **Tri-Phase Latency & Sensor Noise Curriculum**:
+   - **Phase 1 (Iterations 1 to 300)**: $0\text{--}1$ step delay ($0\text{--}20\text{ ms}$, randomized per episode), noise scale $0.25$. Lets the policy adapt smoothly to phase lag without catastrophic drops.
+   - **Phase 2 (Iterations 301 to 800)**: $0\text{--}1$ step delay ($0\text{--}20\text{ ms}$), noise scale $0.50$.
+   - **Phase 3 (Iterations 801+)**: $0\text{--}2$ steps delay ($0\text{--}40\text{ ms}$), noise scale $0.80$.
+2. **Rebalanced Incentive Structure**:
+   - Reduced drop penalty: $w_5 = 80.0 \to 35.0$ (eliminates defensive paralysis).
+   - Increased forward progress weight: $w_{\text{progress}} = 14.0 \to 18.0$.
+   - Increased closure reward: $w_1 = 2.5 \to 3.5$.
+   - Increased terminal success bonus: $w_4 = 50.0 \to 60.0$.
+3. **Exploration Revitalization**:
+   - Reset log-std to $-2.2$ ($\sigma \approx 6.3^\circ$) via `--reset_log_std`.
+   - Boosted entropy coefficient: $c_2 = 0.0003 \to 0.0010$.
+4. **Immediate Validation**:
+   - Training drop rate dropped immediately from $95\%$ down to $63.5\%$.
+   - In-training success rate surged from $5\%$ to $47.3\%$, with Effective Manipulation Index (EMI) increasing from $0.003$ to **$0.185$** in the first 10 iterations.
+
+
 

@@ -25,6 +25,7 @@ Features:
 import os
 import sys
 import time
+import random
 import argparse
 import numpy as np
 import scipy.spatial.transform as transform
@@ -42,6 +43,18 @@ if PROJECT_ROOT not in sys.path:
 from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 OBJECT_NAMES = {1: "Cylinder", 2: "Cube", 3: "Cuboid"}
+
+
+def _shuffle_avoid_adjacent_repeats(items):
+    """Permutes episode items while attempting to avoid back-to-back identical objects."""
+    items = list(items)
+    for _ in range(50):
+        random.shuffle(items)
+        # Check if any two consecutive items have the same object_id
+        if not any(items[i][0] == items[i + 1][0] for i in range(len(items) - 1)):
+            return items
+    return items
+
 RANGE_DEFINITIONS = [
     {
         "id": 1,
@@ -236,6 +249,7 @@ def run_rendered_evaluation(
     hold_time: float = 1.2,
     max_goals: int = 1,
     smooth_alpha: float = 0.50,
+    sample_mode: str = "shuffle",
 ):
     """Interactive visual evaluation with MuJoCo passive 3D viewer."""
     try:
@@ -279,203 +293,194 @@ def run_rendered_evaluation(
             min_rad = r_cfg["min_rad"]
             max_rad = r_cfg["max_rad"]
 
-            for obj_id in [1, 2, 3]:
+            # Construct randomized episode schedule for this range
+            if sample_mode == "sequential":
+                episodes = [(obj_id, ep) for obj_id in [1, 2, 3] for ep in range(1, episodes_per_range + 1)]
+            elif sample_mode == "random":
+                total_eps = episodes_per_range * 3
+                episodes = [(int(np.random.choice([1, 2, 3])), ep) for ep in range(1, total_eps + 1)]
+            else:  # "shuffle" (default: stratified randomized permutation avoiding back-to-back repeats)
+                ep_pool = [(obj_id, ep) for obj_id in [1, 2, 3] for ep in range(1, episodes_per_range + 1)]
+                episodes = _shuffle_avoid_adjacent_repeats(ep_pool)
+
+            print(f"\n---> [{r_name}] Randomized Object Evaluation ({len(episodes)} episodes, mode='{sample_mode}') <---\n")
+
+            for ep_num, (obj_id, ep_idx) in enumerate(episodes, 1):
+                if not viewer.is_running():
+                    print("[Viewer] Window closed by user.")
+                    break
+
                 obj_name = OBJECT_NAMES[obj_id]
-                print(f"\n---> [{r_name}] Object: {obj_name} ({episodes_per_range} episodes) <---")
+                seed = 90000 + (r_id * 1000) + (obj_id * 100) + ep_idx
+                np.random.seed(seed)
+                obs, _ = env.reset(object_id=obj_id)
 
-                for ep in range(1, episodes_per_range + 1):
-                    if not viewer.is_running():
-                        print("[Viewer] Window closed by user.")
-                        break
+                if obj_id == 1:
+                    # Cylinder: dominant longitudinal spin with bounded tilt/nutation
+                    axis = np.array([np.random.uniform(-0.25, 0.25), np.random.uniform(-0.25, 0.25), np.random.choice([-1.0, 1.0])])
+                    axis /= np.linalg.norm(axis)
+                else:
+                    axis = np.random.randn(3)
+                    axis /= np.linalg.norm(axis) + 1e-8
 
-                    seed = 90000 + (r_id * 1000) + (obj_id * 100) + ep
-                    np.random.seed(seed)
-                    obs, _ = env.reset(object_id=obj_id)
+                target_angle = float(np.random.uniform(min_rad, max_rad))
+                rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
+                q_xyzw = rand_rot.as_quat()
+                env.target_quat = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
 
-                    if obj_id == 1:
-                        # Cylinder: dominant longitudinal spin with bounded tilt/nutation
-                        axis = np.array([np.random.uniform(-0.25, 0.25), np.random.uniform(-0.25, 0.25), np.random.choice([-1.0, 1.0])])
-                        axis /= np.linalg.norm(axis)
+                obj_idx = env.model.jnt_qposadr[env.model.joint(f"obj_{obj_id}_joint").id]
+                cur_obj_quat = env.data.qpos[obj_idx + 3 : obj_idx + 7]
+                env.prev_d_theta = env.compute_angular_distance(cur_obj_quat, env.target_quat)
+                env.initial_d_theta = float(env.prev_d_theta)
+
+                init_angle_deg = float(np.degrees(env.initial_d_theta))
+                tol_deg = float(epsilon_ratio * init_angle_deg)
+                theta_rad = float(env.initial_d_theta)
+                quad_steps = int(250 + 200 * theta_rad + 150.0 * (theta_rad**2))
+                env.current_max_steps = min(800, quad_steps)
+                env.set_epsilon_ratio(epsilon_ratio)
+                env.set_epsilon(epsilon_ratio * theta_rad)
+
+                half_height = 0.045 if obj_id == 2 else 0.07
+
+                step = 0
+                terminated = False
+                truncated = False
+                step_info = {}
+                peak_torque = 0.0
+                last_goals_count = 0
+                held_at_goal = False
+                smoothed_act = None
+
+                print(
+                    f"[{r_name}] Ep {ep_num:02d}/{len(episodes)} | Object: {obj_name:<8} | "
+                    f"Target Angle: {init_angle_deg:.1f}° | Epsilon: {env.epsilon:.3f} rad ({tol_deg:.1f}°)"
+                )
+
+                while not (terminated or truncated) and viewer.is_running():
+                    step += 1
+                    with torch.no_grad():
+                        raw_act = actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
+                    if smoothed_act is None:
+                        smoothed_act = raw_act.copy()
                     else:
-                        axis = np.random.randn(3)
-                        axis /= np.linalg.norm(axis) + 1e-8
+                        smoothed_act = smooth_alpha * raw_act + (1.0 - smooth_alpha) * smoothed_act
+                    obs, reward, terminated, truncated, step_info = env.step(smoothed_act)
 
-                    target_angle = float(np.random.uniform(min_rad, max_rad))
-                    rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
-                    q_xyzw = rand_rot.as_quat()
-                    env.target_quat = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]], dtype=np.float32)
+                    cur_torque = float(np.max(np.abs(env.data.actuator_force)))
+                    if cur_torque > peak_torque:
+                        peak_torque = cur_torque
 
-                    obj_idx = env.model.jnt_qposadr[env.model.joint(f"obj_{obj_id}_joint").id]
-                    cur_obj_quat = env.data.qpos[obj_idx + 3 : obj_idx + 7]
-                    env.prev_d_theta = env.compute_angular_distance(cur_obj_quat, env.target_quat)
-                    env.initial_d_theta = float(env.prev_d_theta)
+                    cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
+                    tol_deg = float(epsilon_ratio * init_angle_deg)
 
-                    init_angle_deg = float(np.degrees(env.initial_d_theta))
-                    theta_rad = float(env.initial_d_theta)
-                    quad_steps = int(250 + 200 * theta_rad + 150.0 * (theta_rad**2))
-                    env.current_max_steps = min(800, quad_steps)
-                    env.set_epsilon_ratio(epsilon_ratio)
-                    env.set_epsilon(epsilon_ratio * theta_rad)
+                    # Real-time visual orientation arrow:
+                    # Exactly ONE green arrow representing target orientation.
+                    # It does NOT change direction (constant target vector in world space) but MOVES with the object.
+                    try:
+                        obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
+                        cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
+                        cur_rot = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]])
+                        # Anchor on top face of the object (moves with object)
+                        base_point = obj_pos + cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
 
-                    half_height = 0.045 if obj_id == 2 else 0.07
+                        # Target orientation direction in world frame (constant throughout episode)
+                        tgt_q = env.target_quat
+                        tgt_rot = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]])
+                        tgt_dir = tgt_rot.apply(np.array([0.0, 0.0, 1.0]))
 
-                    step = 0
-                    terminated = False
-                    truncated = False
-                    step_info = {}
-                    peak_torque = 0.0
-                    last_goals_count = 0
-                    held_at_goal = False
-                    smoothed_act = None
+                        arrow_len = 0.15
+                        arrow_rad = 0.0035
+                        tip_pos = base_point + arrow_len * tgt_dir
 
-                    while not (terminated or truncated) and viewer.is_running():
-                        step += 1
-                        with torch.no_grad():
-                            raw_act = actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-                        if smoothed_act is None:
-                            smoothed_act = raw_act.copy()
-                        else:
-                            smoothed_act = smooth_alpha * raw_act + (1.0 - smooth_alpha) * smoothed_act
-                        obs, reward, terminated, truncated, step_info = env.step(smoothed_act)
+                        with viewer.lock():
+                            viewer.user_scn.ngeom = 0
 
-                        cur_torque = float(np.max(np.abs(env.data.actuator_force)))
-                        if cur_torque > peak_torque:
-                            peak_torque = cur_torque
+                            # Small anchor hub on object top marker
+                            _add_user_sphere(viewer.user_scn, base_point, 0.0045, [1.0, 0.85, 0.0, 1.0])
 
-                        cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
-                        tol_deg = float(epsilon_ratio * init_angle_deg)
+                            # Exactly ONE Green Arrow: Target Orientation (constant direction, moves with object)
+                            _add_user_arrow(viewer.user_scn, base_point, tip_pos, arrow_rad, [0.05, 1.0, 0.05, 1.0])
 
-                        # Real-time visual orientation arrow:
-                        # Exactly ONE green arrow representing target orientation.
-                        # It does NOT change direction (constant target vector in world space) but MOVES with the object.
-                        try:
-                            obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
-                            cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
-                            cur_rot = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]])
-                            # Anchor on top face of the object (moves with object)
-                            base_point = obj_pos + cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
+                        # Overlay real-time HUD telemetry on passive viewer
+                        viewer.set_texts([
+                            (
+                                mujoco.mjtFontScale.mjFONTSCALE_150,
+                                mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                f"GREEN Arrow: Target Orientation (Moves with Object) | [{r_name}] {obj_name} Ep {ep_num}/{len(episodes)}",
+                                f"Err: {cur_err_deg:.1f}° (Tol: {tol_deg:.1f}°) | Goals: {step_info.get('successes_in_episode', 0)} | Step: {step}",
+                            )
+                        ])
+                    except Exception:
+                        pass
 
-                            # Target orientation direction in world frame (constant throughout episode)
-                            tgt_q = env.target_quat
-                            tgt_rot = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]])
-                            tgt_dir = tgt_rot.apply(np.array([0.0, 0.0, 1.0]))
+                    viewer.sync()
+                    time.sleep(0.002)
 
-                            arrow_len = 0.15
-                            arrow_rad = 0.0035
-                            tip_pos = base_point + arrow_len * tgt_dir
-
-                            with viewer.lock():
-                                viewer.user_scn.ngeom = 0
-
-                                # Small anchor hub on object top marker
-                                _add_user_sphere(viewer.user_scn, base_point, 0.0045, [1.0, 0.85, 0.0, 1.0])
-
-                                # Exactly ONE Green Arrow: Target Orientation (constant direction, moves with object)
-                                _add_user_arrow(viewer.user_scn, base_point, tip_pos, arrow_rad, [0.05, 1.0, 0.05, 1.0])
-
-                            # Overlay real-time HUD telemetry on passive viewer
-                            viewer.set_texts([
-                                (
-                                    mujoco.mjtFontScale.mjFONTSCALE_150,
-                                    mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                    f"GREEN Arrow: Target Orientation (Moves with Object) | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
-                                    f"Err: {cur_err_deg:.1f}° (Tol: {tol_deg:.1f}°) | Goals: {step_info.get('successes_in_episode', 0)} | Step: {step}",
-                                )
-                            ])
-                        except Exception as err:
-                            print(f"[Viewer Warning] Arrow rendering error: {err}")
-
-                        viewer.sync()
-                        time.sleep(0.015)
-
-                        goals = step_info.get("successes_in_episode", 0)
-
-                        # --- FIRM PRESENTATION HOLD BLOCK (FOR PROFESSOR DEMONSTRATIONS) ---
-                        # The instant a goal is scored or error drops below tolerance, hold the grasp firmly
-                        # for hold_time seconds so the professor clearly observes the 100% alignment.
-                        if (goals > last_goals_count or (cur_err_deg <= tol_deg and not held_at_goal)) and hold_time > 0:
+                    current_goals = step_info.get("successes_in_episode", 0)
+                    if current_goals > last_goals_count:
+                        last_goals_count = current_goals
+                        if current_goals >= max_goals:
+                            terminated = True
                             held_at_goal = True
-                            last_goals_count = goals
-                            hold_start = time.time()
-                            last_ctrl = env.data.ctrl.copy()
-                            while (time.time() - hold_start < hold_time) and viewer.is_running():
-                                env.data.ctrl[:] = last_ctrl
-                                env.data.qvel[:12] *= 0.85  # Damp residual velocity to maintain rock-solid stationary hold
-                                mujoco.mj_step(env.model, env.data)
-                                elapsed = time.time() - hold_start
-                                viewer.set_texts([
-                                    (
-                                        mujoco.mjtFontScale.mjFONTSCALE_150,
-                                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                        f"*** TARGET REACHED! FIRM GRIP LOCK-IN ***",
-                                        f"Holding Firm for Professor ({elapsed:.1f}s / {hold_time:.1f}s) | Error: {cur_err_deg:.1f}° <= {tol_deg:.1f}° | ALIGNED 100%",
-                                    )
-                                ])
-                                viewer.sync()
-                                time.sleep(0.02)
-
-                        if goals >= max_goals:
                             break
 
-                    final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
-                    raw_dropped = bool(step_info.get("raw_dropped", False))
-                    goals_achieved = step_info.get("successes_in_episode", 0)
-                    is_success = bool(goals_achieved > 0 or final_err_deg <= (epsilon_ratio * init_angle_deg))
+                final_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
+                goals_achieved = step_info.get("successes_in_episode", 0)
+                is_success = bool(goals_achieved > 0)
+                raw_dropped = bool(step_info.get("raw_dropped", False))
 
-                    # Post-episode presentation hold fallback:
-                    if is_success and not held_at_goal and hold_time > 0 and viewer.is_running():
-                        held_at_goal = True
-                        hold_start = time.time()
-                        last_ctrl = env.data.ctrl.copy()
-                        while (time.time() - hold_start < hold_time) and viewer.is_running():
-                            env.data.ctrl[:] = last_ctrl
-                            env.data.qvel[:12] *= 0.85
-                            mujoco.mj_step(env.model, env.data)
-                            elapsed = time.time() - hold_start
-                            viewer.set_texts([
-                                (
-                                    mujoco.mjtFontScale.mjFONTSCALE_150,
-                                    mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                    f"*** TARGET REACHED! FIRM GRIP LOCK-IN ***",
-                                    f"Holding Firm for Professor ({elapsed:.1f}s / {hold_time:.1f}s) | Error: {final_err_deg:.1f}° <= {epsilon_ratio*init_angle_deg:.1f}° | ALIGNED 100%",
-                                )
-                            ])
-                            viewer.sync()
-                            time.sleep(0.02)
-                    dropped_before_success = bool(raw_dropped and (goals_achieved == 0))
-                    pre_goal_retained = not dropped_before_success
-                    
-                    if goals_achieved > 0:
-                        closure = 1.0
-                    elif dropped_before_success:
-                        closure = 0.0
-                    else:
-                        closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
+                if is_success and hold_time > 0:
+                    hold_start = time.time()
+                    last_ctrl = env.data.ctrl[:].copy()
+                    while (time.time() - hold_start < hold_time) and viewer.is_running():
+                        env.data.ctrl[:] = last_ctrl
+                        env.data.qvel[:12] *= 0.85
+                        mujoco.mj_step(env.model, env.data)
+                        elapsed = time.time() - hold_start
+                        viewer.set_texts([
+                            (
+                                mujoco.mjtFontScale.mjFONTSCALE_150,
+                                mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                f"*** TARGET REACHED! FIRM GRIP LOCK-IN ***",
+                                f"Holding Firm for Professor ({elapsed:.1f}s / {hold_time:.1f}s) | Error: {final_err_deg:.1f}° <= {epsilon_ratio*init_angle_deg:.1f}° | ALIGNED 100%",
+                            )
+                        ])
+                        viewer.sync()
+                        time.sleep(0.02)
 
-                    rec = {
-                        "range_id": r_id,
-                        "object_id": obj_id,
-                        "init_angle_deg": init_angle_deg,
-                        "final_err_deg": final_err_deg,
-                        "is_success": is_success,
-                        "closure": closure,
-                        "raw_dropped": raw_dropped,
-                        "pre_goal_retained": pre_goal_retained,
-                        "dropped_before_success": dropped_before_success,
-                        "goals_achieved": goals_achieved,
-                        "steps": step,
-                        "peak_torque": peak_torque,
-                    }
-                    all_results.append(rec)
+                dropped_before_success = bool(raw_dropped and (goals_achieved == 0))
+                pre_goal_retained = not dropped_before_success
+                
+                if goals_achieved > 0:
+                    closure = 1.0
+                elif dropped_before_success:
+                    closure = 0.0
+                else:
+                    closure = max(0.0, 1.0 - (final_err_deg / (init_angle_deg + 1e-6)))
 
-                    succ_tag = "SUCCESS" if is_success else "FAIL"
-                    drop_tag = "DROPPED" if raw_dropped else "HELD"
-                    print(
-                        f"  Ep {ep:03d} | Init: {init_angle_deg:4.1f}° | Err: {final_err_deg:4.1f}° | "
-                        f"Clos: {closure*100:5.1f}% | {succ_tag:<7} | {drop_tag:<7} | Steps: {step:3d} | Torque: {peak_torque:4.2f}N·m"
-                    )
-                if not viewer.is_running():
-                    break
+                rec = {
+                    "range_id": r_id,
+                    "object_id": obj_id,
+                    "init_angle_deg": init_angle_deg,
+                    "final_err_deg": final_err_deg,
+                    "is_success": is_success,
+                    "closure": closure,
+                    "raw_dropped": raw_dropped,
+                    "pre_goal_retained": pre_goal_retained,
+                    "dropped_before_success": dropped_before_success,
+                    "goals_achieved": goals_achieved,
+                    "steps": step,
+                    "peak_torque": peak_torque,
+                }
+                all_results.append(rec)
+
+                succ_tag = "SUCCESS" if is_success else "FAIL"
+                drop_tag = "DROPPED" if raw_dropped else "HELD"
+                print(
+                    f"  Ep {ep_num:03d} | Init: {init_angle_deg:4.1f}° | Err: {final_err_deg:4.1f}° | "
+                    f"Clos: {closure*100:5.1f}% | {succ_tag:<7} | {drop_tag:<7} | Steps: {step:3d} | Torque: {peak_torque:4.2f}N·m"
+                )
             if not viewer.is_running():
                 break
 
@@ -489,12 +494,13 @@ def run_parallel_evaluation(
     num_workers: int = 16,
     epsilon_ratio: float = 0.10,
     smooth_alpha: float = 1.0,
+    sample_mode: str = "shuffle",
 ):
     """High-speed headless multi-worker evaluation across both angle ranges."""
     print(f"\n[Parallel Evaluator] Loading Checkpoint: {checkpoint_path}")
     print(f"  Protocol: {episodes_per_range} episodes per range × 2 ranges × 3 objects = {episodes_per_range * 6} total episodes")
     print(f"  Target Precision Envelope: {epsilon_ratio*100:.1f}% relative error tolerance")
-    print(f"  Workers: {num_workers} parallel CPU processes | Smooth Alpha: {smooth_alpha:.2f}\n")
+    print(f"  Workers: {num_workers} parallel CPU processes | Smooth Alpha: {smooth_alpha:.2f} | Sample Mode: {sample_mode}\n")
 
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("actor_state_dict", payload.get("model_state_dict"))
@@ -506,10 +512,24 @@ def run_parallel_evaluation(
         r_id = r_cfg["id"]
         min_rad = r_cfg["min_rad"]
         max_rad = r_cfg["max_rad"]
-        for obj_id in [1, 2, 3]:
-            for ep in range(episodes_per_range):
-                seed = 50000 + (r_id * 1000) + (obj_id * 100) + ep
+        if sample_mode == "sequential":
+            for obj_id in [1, 2, 3]:
+                for ep in range(episodes_per_range):
+                    seed = 50000 + (r_id * 1000) + (obj_id * 100) + ep
+                    tasks.append((seed, r_id, obj_id, min_rad, max_rad))
+        elif sample_mode == "random":
+            total_eps = episodes_per_range * 3
+            for ep in range(total_eps):
+                obj_id = int(np.random.choice([1, 2, 3]))
+                seed = 50000 + (r_id * 1000) + ep
                 tasks.append((seed, r_id, obj_id, min_rad, max_rad))
+        else:  # "shuffle" (default: stratified randomized permutation avoiding back-to-back repeats)
+            range_tasks = []
+            for obj_id in [1, 2, 3]:
+                for ep in range(episodes_per_range):
+                    seed = 50000 + (r_id * 1000) + (obj_id * 100) + ep
+                    range_tasks.append((seed, r_id, obj_id, min_rad, max_rad))
+            tasks.extend(_shuffle_avoid_adjacent_repeats(range_tasks))
 
     t_start = time.time()
     init_args = (state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio, smooth_alpha)
@@ -709,7 +729,24 @@ def main():
         default=1.0,
         help="Action filter alpha (default: 1.0 = raw policy actions for peak benchmark accuracy; e.g. 0.50 = exponential smoothing for jitter-free visual rendering)",
     )
+    parser.add_argument(
+        "--sample_mode",
+        type=str,
+        default="shuffle",
+        choices=["shuffle", "random", "sequential"],
+        help="Object sampling mode across episodes: 'shuffle' (randomized stratified permutation, default), 'random' (independent random sample with replacement per episode), 'sequential' (legacy grouped: all cylinders, then all cubes, then all cuboids)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Optional random seed for reproducible episode ordering and sampling.",
+    )
     args = parser.parse_args()
+
+    if args.seed is not None:
+        np.random.seed(args.seed)
+        random.seed(args.seed)
 
     if not os.path.exists(args.checkpoint):
         print(f"Error: Checkpoint file not found at: {args.checkpoint}")
@@ -724,6 +761,7 @@ def main():
             hold_time=args.hold_time,
             max_goals=args.max_goals,
             smooth_alpha=args.smooth_alpha,
+            sample_mode=args.sample_mode,
         )
     else:
         run_parallel_evaluation(
@@ -733,6 +771,7 @@ def main():
             num_workers=args.num_workers,
             epsilon_ratio=args.epsilon_ratio,
             smooth_alpha=args.smooth_alpha,
+            sample_mode=args.sample_mode,
         )
 
 

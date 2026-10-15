@@ -164,6 +164,9 @@ def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, sce
                 tasks.append((seed, r_id, obj_id, min_rad, max_rad))
                 task_idx += 1
                 
+    # Randomize task order across objects and ranges
+    np.random.shuffle(tasks)
+
     ctx = mp.get_context("spawn")
     with ctx.Pool(num_workers, initializer=_init_eval_worker, initargs=init_args) as pool:
         results = pool.map(_eval_single_episode, tasks)

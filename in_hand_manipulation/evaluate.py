@@ -169,7 +169,14 @@ def _eval_single_task(task_args):
     }
 
 
-def run_rendered_evaluation(checkpoint_path: str, scene_xml_path: str, episodes_per_range: int, epsilon_ratio: float):
+def run_rendered_evaluation(
+    checkpoint_path: str,
+    scene_xml_path: str,
+    episodes_per_range: int,
+    epsilon_ratio: float,
+    hold_time: float = 1.2,
+    max_goals: int = 1,
+):
     """Interactive visual evaluation with MuJoCo passive 3D viewer."""
     try:
         import mujoco

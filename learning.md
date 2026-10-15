@@ -1791,6 +1791,62 @@ Developed a standalone watchdog daemon that runs concurrently alongside training
   - **Cube in Range 1**: **`71.0%` Success** with **`100.0%` Retention (0 drops)**!
   - Successfully verified in 19.4 seconds across 16 parallel workers ($30.9\text{ eps/sec}$).
 
+---
+
+## 51. Dedicated Sim-to-Real Domain Randomization Evaluation Suite (`evaluate_dr.py`)
+
+### 1. Purpose and Separation of Evaluation Protocols
+To rigorously benchmark policy transferability to the physical Delto Gripper-3F without relying on idealized simulator conditions, a dedicated evaluator was designed (`in_hand_manipulation/evaluate_dr.py`):
+1. **Clean Baseline (`evaluate.py`)**: Tests dexterity and upper-bound kinematics under nominal conditions (zero latency, zero sensor jitter, exact nominal physics) for visual presentations and baseline metrics.
+2. **Stressed Sim-to-Real Benchmark (`evaluate_dr.py`)**: Stresses the policy with simultaneous hardware transport delay, sensor noise, dynamic silicone surface degradation, object property variance, and non-privileged observations.
+
+### 2. Domain Randomization Stress Envelope
+- **Actuation Latency Queue (`--action_delay_max 1`)**:
+  FIFO queue applying $0\text{--}1$ control step delay ($0\text{--}20\text{ ms}$ at $50\text{ Hz}$), matching real-world USB-to-CAN bus transmission jitter.
+- **Sensor Observation Noise (`--obs_noise_scale 0.80`)**:
+  - Joint encoder jitter: $\mathcal{N}(0, 0.012^2)$ rad ($\approx 0.68^\circ$).
+  - Joint velocity noise: $\mathcal{N}(0, 0.04^2)$ rad/s (finite-difference derivative noise).
+  - Vision object position drift: $\mathcal{N}(0, 0.003^2)$ m ($3\text{ mm}$ camera calibration drift).
+  - Vision object quaternion drift: $\mathcal{N}(0, 0.02^2)$ rad ($\approx 1.1^\circ$ pose estimator noise).
+- **Dynamic Silicone Friction**:
+  Fingertip and palm sliding friction randomized across $\mu \in [2.1, 3.9]$ ($\pm 30\%$ per episode) to simulate silicone wear, dust accumulation, and temperature shifts.
+- **Physical Property Variation (`--dr_ratio 0.30`)**:
+  $\pm 30\%$ independent uniform scaling on mass, inertia, and dimensions across all 3 object shapes.
+- **Non-Privileged Observations**:
+  The policy receives nominal physical parameter estimates $[r_0, h_0, m_0, \mu_0]$ rather than privileged ground-truth values.
+
+### 3. Canonical 600-Episode Benchmark Comparison: Clean Simulation vs. Domain Randomization
+
+Both benchmarks were executed on the reigning champion checkpoint (`best_model/best_model.pth`) across identical seeds, stratified over 300 Range 1 ($10^\circ\text{--}40^\circ$) and 300 Range 2 ($40^\circ\text{--}90^\circ$) episodes (100 episodes per object per range):
+
+| Evaluation Metric | Clean Baseline (`evaluate.py`) | Stressed DR (`evaluate_dr.py`) | Transfer Delta |
+| :--- | :--- | :--- | :--- |
+| **Range 1 Success Rate (@10% Tol)** | **`77.7%`** | **`40.0%`** | $-37.7\%$ |
+| **Range 1 Rotational Closure** | **`88.1%`** | **`43.5%`** | $-44.6\%$ |
+| **Range 1 Object Retention** | **`98.0%`** | **`53.0%`** | $-45.0\%$ |
+| **Range 1 Mean Final Error** | **`6.2°`** | **`60.0°`** | $+53.8^\circ$ |
+| **Range 1 Benchmark Score** | **`0.8485`** | **`0.4365`** | $-0.4120$ |
+| **Range 2 Success Rate (@10% Tol)** | **`49.7%`** | **`26.7%`** | $-23.0\%$ |
+| **Range 2 Rotational Closure** | **`60.6%`** | **`30.3%`** | $-30.3\%$ |
+| **Range 2 Object Retention** | **`75.7%`** | **`36.0%`** | $-39.7\%$ |
+| **Range 2 Benchmark Score** | **`0.5814`** | **`0.2961`** | $-0.2853$ |
+| **Grand Composite Success Rate** | **`63.7%`** | **`33.3%`** | $-30.4\%$ |
+| **Grand Mean Rotational Closure** | **`74.3%`** | **`36.9%`** | $-37.4\%$ |
+| **Grand Retention Rate** | **`86.8%`** | **`44.5%`** | $-42.3\%$ |
+| **Grand Composite Score** | **`0.7149`** | **`0.3663`** | $-0.3486$ |
+
+### 4. Per-Object Analysis under Domain Randomization
+
+In Range 1 ($10^\circ \text{--} 40^\circ$ Small-to-Medium Rotations):
+- **Cuboid**: Highest resilience under DR with **$47.0\%$ Success**, **$49.6\%$ Closure**, **$58.0\%$ Retention**, and mean error of **$46.8^\circ$**. Planar contacts provide natural stability against latency jitter.
+- **Cylinder**: **$40.0\%$ Success**, **$41.5\%$ Closure**, **$45.0\%$ Retention**. The longitudinal rolling symmetry makes it more sensitive to friction drops when latency is introduced.
+- **Cube**: **$33.0\%$ Success**, **$39.4\%$ Closure**, **$56.0\%$ Retention**. Retains well ($56\%$) but struggles to complete reorientation within the tight $10\%$ tolerance when sensor jitter is present.
+
+### 5. Transfer Readiness Takeaways
+1. **Zero Policy Crashes**: The policy executes stably without mathematical blowups, instability, or NaN divergence under CAN-bus latency and sensor jitter.
+2. **Conservative Adaptation**: The champion model (`Iteration 300`) was adapted through the early latency curriculum phase ($0\text{--}1$ steps delay, $0.25$ noise). While it maintains a solid $40.0\%$ Range 1 success rate under the harsher $0.80$ noise and friction perturbation, further fine-tuning directly inside Phase 2/3 DR with the rebalanced reward weights will bridge the remaining Sim-to-Real gap toward $>65\%$ DR success.
+
+
 
 
 

@@ -35,15 +35,17 @@ from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 _worker_actor = None
 _worker_env = None
 _worker_epsilon_ratio = 0.10
+_worker_smooth_alpha = 1.0
 
 
-def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio):
-    global _worker_actor, _worker_env, _worker_epsilon_ratio
+def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio, smooth_alpha=1.0):
+    global _worker_actor, _worker_env, _worker_epsilon_ratio, _worker_smooth_alpha
     torch.set_num_threads(1)
     _worker_actor = ActorNetwork(obs_dim=39, act_dim=12)
     _worker_actor.load_state_dict(state_dict, strict=False)
     _worker_actor.eval()
     _worker_epsilon_ratio = epsilon_ratio
+    _worker_smooth_alpha = smooth_alpha
     
     _worker_env = DeltoInHandManipulationEnv(
         scene_xml_path=scene_xml_path,
@@ -59,7 +61,7 @@ def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_an
 
 
 def _eval_single_episode(task_tuple):
-    global _worker_actor, _worker_env, _worker_epsilon_ratio
+    global _worker_actor, _worker_env, _worker_epsilon_ratio, _worker_smooth_alpha
     seed, range_id, obj_id, min_rad, max_rad = task_tuple
     np.random.seed(seed)
     obs, _ = _worker_env.reset(object_id=obj_id)
@@ -103,7 +105,7 @@ def _eval_single_episode(task_tuple):
         if smoothed_act is None:
             smoothed_act = raw_act.copy()
         else:
-            smoothed_act = 0.50 * raw_act + 0.50 * smoothed_act
+            smoothed_act = _worker_smooth_alpha * raw_act + (1.0 - _worker_smooth_alpha) * smoothed_act
         obs, reward, terminated, truncated, step_info = _worker_env.step(smoothed_act)
         goals_achieved = step_info.get("successes_in_episode", 0)
         if goals_achieved >= 1:
@@ -138,13 +140,13 @@ def _eval_single_episode(task_tuple):
     }
 
 
-def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, scene_xml_path: str, max_goal_angle: float, min_goal_angle: float, epsilon_ratio: float):
+def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, scene_xml_path: str, max_goal_angle: float, min_goal_angle: float, epsilon_ratio: float, smooth_alpha: float = 1.0):
     payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("actor_state_dict", payload.get("model_state_dict"))
     obs_mean = payload["obs_mean"]
     obs_std = payload["obs_std"]
     
-    init_args = (state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio)
+    init_args = (state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio, smooth_alpha)
     
     # Construct balanced evaluation tasks:
     # Range 1: 10° to 40° (0.17453 to 0.69813 rad)
@@ -220,7 +222,9 @@ def main():
     parser.add_argument("--num_workers", type=int, default=4, help="Number of parallel evaluation workers (default: 4)")
     parser.add_argument("--max_goal_angle", type=float, default=1.57, help="Max target rotation angle in radians")
     parser.add_argument("--min_goal_angle", type=float, default=0.15, help="Min target rotation angle in radians")
-    parser.add_argument("--epsilon_ratio", type=float, default=0.20, help="Target relative error threshold")
+    parser.add_argument("--epsilon_ratio", type=float, default=0.10, help="Target relative error threshold (default: 0.10)")
+    parser.add_argument("--smooth_alpha", type=float, default=1.0, help="Action smoothing alpha (default: 1.0 for peak benchmark accuracy)")
+    parser.add_argument("--delete_checkpoints", action="store_true", default=False, help="Delete intermediate milestone checkpoints after evaluation")
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")
     parser.add_argument("--update_global_best", action="store_true", help="Also promote to global best_model/best_model.pth")
@@ -263,7 +267,8 @@ def main():
                 scene_xml_path=args.scene_xml,
                 max_goal_angle=args.max_goal_angle,
                 min_goal_angle=args.min_goal_angle,
-                epsilon_ratio=args.epsilon_ratio
+                epsilon_ratio=args.epsilon_ratio,
+                smooth_alpha=args.smooth_alpha,
             )
             best_score = base_metrics["score"]
             print(f"  Reigning Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
@@ -321,7 +326,8 @@ def main():
                     scene_xml_path=args.scene_xml,
                     max_goal_angle=args.max_goal_angle,
                     min_goal_angle=args.min_goal_angle,
-                    epsilon_ratio=active_eps
+                    epsilon_ratio=active_eps,
+                    smooth_alpha=args.smooth_alpha,
                 )
                 t_eval = time.time() - t_start
                 
@@ -354,7 +360,8 @@ def main():
                             scene_xml_path=args.scene_xml,
                             max_goal_angle=args.max_goal_angle,
                             min_goal_angle=args.min_goal_angle,
-                            epsilon_ratio=active_eps
+                            epsilon_ratio=active_eps,
+                            smooth_alpha=args.smooth_alpha,
                         )
                         reeval_score = reeval_metrics["score"]
                         print(f"  [Verification Result] Best Actor fresh score: {reeval_score:.4f} (Prior baseline: {best_score:.4f}) in {time.time()-t_reeval:.1f}s", flush=True)
@@ -430,13 +437,14 @@ def main():
             except Exception as e:
                 print(f"  [Error evaluating checkpoint {ckpt_file}]: {e}", flush=True)
                 
-            # Delete intermediate milestone checkpoint to save disk space
-            try:
-                if os.path.exists(ckpt_file):
-                    os.remove(ckpt_file)
-                    # print(f"  [Cleanup] Deleted intermediate milestone: {os.path.basename(ckpt_file)}")
-            except Exception as e:
-                print(f"  [Cleanup Warning]: Could not remove {ckpt_file}: {e}")
+            # Delete intermediate milestone checkpoint only if explicitly requested
+            if args.delete_checkpoints:
+                try:
+                    if os.path.exists(ckpt_file):
+                        os.remove(ckpt_file)
+                        # print(f"  [Cleanup] Deleted intermediate milestone: {os.path.basename(ckpt_file)}")
+                except Exception as e:
+                    print(f"  [Cleanup Warning]: Could not remove {ckpt_file}: {e}")
                 
         else:
             # Queue is empty. Check if training has signaled completion

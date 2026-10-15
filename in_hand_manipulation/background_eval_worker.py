@@ -327,11 +327,18 @@ def main():
             best_score = base_metrics["score"]
             print(f"  Reigning Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
         except Exception as e:
-            print(f"  Could not evaluate initial baseline: {e}")
-            
     processed_iters = set()
-    
-    while True:
+    if os.path.exists(eval_log):
+        try:
+            with open(eval_log, "r") as f:
+                for line in f.readlines()[1:]:
+                    parts = line.strip().split(",")
+                    if parts and parts[0].isdigit():
+                        processed_iters.add(int(parts[0]))
+            if processed_iters:
+                print(f"[Background Evaluator] Resumed with {len(processed_iters)} previously evaluated milestones: {sorted(list(processed_iters))}")
+        except Exception:
+            pass
         pattern = os.path.join(watch_dir, "ppo_checkpoint_iter_*.pth")
         all_ckpts = glob.glob(pattern)
         

@@ -38,7 +38,20 @@ _worker_epsilon_ratio = 0.10
 _worker_smooth_alpha = 1.0
 
 
-def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio, smooth_alpha=1.0):
+def _init_eval_worker(
+    state_dict,
+    obs_mean,
+    obs_std,
+    scene_xml_path,
+    max_goal_angle,
+    min_goal_angle,
+    epsilon_ratio,
+    smooth_alpha=1.0,
+    sim2real_dr=False,
+    action_delay_max=1,
+    obs_noise_scale=0.80,
+    dr_ratio=0.30,
+):
     global _worker_actor, _worker_env, _worker_epsilon_ratio, _worker_smooth_alpha
     torch.set_num_threads(1)
     _worker_actor = ActorNetwork(obs_dim=39, act_dim=12)
@@ -53,10 +66,13 @@ def _init_eval_worker(state_dict, obs_mean, obs_std, scene_xml_path, max_goal_an
         obs_std=obs_std,
         max_episode_steps=250,
         max_goal_angle=1.5708,
-        dr_ratio=0.20,
+        dr_ratio=dr_ratio,
         steps_per_radian=200,
         bonus_steps_per_success=150,
         max_steps_cap=800,
+        sim2real_dr=sim2real_dr,
+        action_delay_max=action_delay_max,
+        obs_noise_scale=obs_noise_scale,
     )
 
 
@@ -90,6 +106,9 @@ def _eval_single_episode(task_tuple):
     _worker_env.current_max_steps = min(800, quad_steps)
     _worker_env.set_epsilon_ratio(_worker_epsilon_ratio)
     _worker_env.set_epsilon(_worker_epsilon_ratio * theta_rad)
+    
+    # Refresh observation with target_quat and active DR noise
+    obs = _worker_env._get_observation()
     
     step = 0
     terminated = False
@@ -140,13 +159,39 @@ def _eval_single_episode(task_tuple):
     }
 
 
-def evaluate_checkpoint(ckpt_path: str, num_episodes: int, num_workers: int, scene_xml_path: str, max_goal_angle: float, min_goal_angle: float, epsilon_ratio: float, smooth_alpha: float = 1.0):
+def evaluate_checkpoint(
+    ckpt_path: str,
+    num_episodes: int,
+    num_workers: int,
+    scene_xml_path: str,
+    max_goal_angle: float,
+    min_goal_angle: float,
+    epsilon_ratio: float,
+    smooth_alpha: float = 1.0,
+    sim2real_dr: bool = False,
+    action_delay_max: int = 1,
+    obs_noise_scale: float = 0.80,
+    dr_ratio: float = 0.30,
+):
     payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("actor_state_dict", payload.get("model_state_dict"))
     obs_mean = payload["obs_mean"]
     obs_std = payload["obs_std"]
     
-    init_args = (state_dict, obs_mean, obs_std, scene_xml_path, max_goal_angle, min_goal_angle, epsilon_ratio, smooth_alpha)
+    init_args = (
+        state_dict,
+        obs_mean,
+        obs_std,
+        scene_xml_path,
+        max_goal_angle,
+        min_goal_angle,
+        epsilon_ratio,
+        smooth_alpha,
+        sim2real_dr,
+        action_delay_max,
+        obs_noise_scale,
+        dr_ratio,
+    )
     
     # Construct balanced evaluation tasks:
     # Range 1: 10° to 40° (0.17453 to 0.69813 rad)
@@ -228,6 +273,10 @@ def main():
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")
     parser.add_argument("--update_global_best", action="store_true", help="Also promote to global best_model/best_model.pth")
+    parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization during evaluation")
+    parser.add_argument("--action_delay_max", type=int, default=1, help="Max action delay steps for DR evaluation (default: 1 -> 20ms)")
+    parser.add_argument("--obs_noise_scale", type=float, default=0.80, help="Observation noise scale factor (default: 0.80)")
+    parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (default: 0.30)")
     args = parser.parse_args()
     
     watch_dir = os.path.abspath(args.watch_dir)
@@ -243,6 +292,7 @@ def main():
     print(f"  Evaluation Episodes : {args.num_episodes} (across Cylinder, Cube, Cuboid)")
     print(f"  Workers             : {args.num_workers}")
     print(f"  Target Tolerance    : {args.epsilon_ratio*100:.1f}% error | Max Angle: {np.degrees(args.max_goal_angle):.1f}°")
+    print(f"  Sim-to-Real DR      : {'ACTIVE (Delay=' + str(args.action_delay_max*20) + 'ms, Noise=' + str(args.obs_noise_scale) + ', DR=±' + str(int(args.dr_ratio*100)) + '%)' if args.sim2real_dr else 'CLEAN SIM'}")
     print(f"  Best Model Output   : {best_output}")
     print(f"  Stop Flag Trigger   : {stop_flag}\n", flush=True)
     
@@ -269,6 +319,10 @@ def main():
                 min_goal_angle=args.min_goal_angle,
                 epsilon_ratio=args.epsilon_ratio,
                 smooth_alpha=args.smooth_alpha,
+                sim2real_dr=args.sim2real_dr,
+                action_delay_max=args.action_delay_max,
+                obs_noise_scale=args.obs_noise_scale,
+                dr_ratio=args.dr_ratio,
             )
             best_score = base_metrics["score"]
             print(f"  Reigning Baseline Benchmark Score: {best_score:.4f} [R1(10-40°): {base_metrics['r1_succ']*100:.1f}%, R2(40-90°): {base_metrics['r2_succ']*100:.1f}% | Overall: Succ {base_metrics['success_rate']*100:.1f}%, Clos {base_metrics['mean_closure']*100:.1f}%, Ret {base_metrics['pre_goal_retention']*100:.1f}%] in {time.time()-t0:.1f}s\n", flush=True)
@@ -328,6 +382,10 @@ def main():
                     min_goal_angle=args.min_goal_angle,
                     epsilon_ratio=active_eps,
                     smooth_alpha=args.smooth_alpha,
+                    sim2real_dr=args.sim2real_dr,
+                    action_delay_max=args.action_delay_max,
+                    obs_noise_scale=args.obs_noise_scale,
+                    dr_ratio=args.dr_ratio,
                 )
                 t_eval = time.time() - t_start
                 
@@ -362,6 +420,10 @@ def main():
                             min_goal_angle=args.min_goal_angle,
                             epsilon_ratio=active_eps,
                             smooth_alpha=args.smooth_alpha,
+                            sim2real_dr=args.sim2real_dr,
+                            action_delay_max=args.action_delay_max,
+                            obs_noise_scale=args.obs_noise_scale,
+                            dr_ratio=args.dr_ratio,
                         )
                         reeval_score = reeval_metrics["score"]
                         print(f"  [Verification Result] Best Actor fresh score: {reeval_score:.4f} (Prior baseline: {best_score:.4f}) in {time.time()-t_reeval:.1f}s", flush=True)

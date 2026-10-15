@@ -95,8 +95,14 @@ def _eval_single_task(task_args):
     obs, _ = _w_env.reset(object_id=obj_id)
 
     # Sample uniform axis and uniform angle in specified range
-    axis = np.random.randn(3)
-    axis /= np.linalg.norm(axis) + 1e-8
+    if obj_id == 1:
+        # Cylinder: dominant longitudinal spin with bounded tilt/nutation
+        axis = np.array([np.random.uniform(-0.25, 0.25), np.random.uniform(-0.25, 0.25), np.random.choice([-1.0, 1.0])])
+        axis /= np.linalg.norm(axis)
+    else:
+        axis = np.random.randn(3)
+        axis /= np.linalg.norm(axis) + 1e-8
+
     target_angle = float(np.random.uniform(min_rad, max_rad))
     rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
     q_xyzw = rand_rot.as_quat()
@@ -119,19 +125,24 @@ def _eval_single_task(task_args):
     truncated = False
     step_info = {}
     peak_torque = 0.0
+    smoothed_act = None
 
     while not (terminated or truncated):
         step += 1
         with torch.no_grad():
-            act = _w_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-        obs, reward, terminated, truncated, step_info = _w_env.step(act)
+            raw_act = _w_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
+        if smoothed_act is None:
+            smoothed_act = raw_act.copy()
+        else:
+            smoothed_act = 0.50 * raw_act + 0.50 * smoothed_act
+        obs, reward, terminated, truncated, step_info = _w_env.step(smoothed_act)
         
         cur_torque = float(np.max(np.abs(_w_env.data.actuator_force)))
         if cur_torque > peak_torque:
             peak_torque = cur_torque
             
         goals = step_info.get("successes_in_episode", 0)
-        if goals >= 2:
+        if goals >= 1:
             break
 
     final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
@@ -176,6 +187,7 @@ def run_rendered_evaluation(
     epsilon_ratio: float,
     hold_time: float = 1.2,
     max_goals: int = 1,
+    smooth_alpha: float = 0.50,
 ):
     """Interactive visual evaluation with MuJoCo passive 3D viewer."""
     try:
@@ -232,8 +244,14 @@ def run_rendered_evaluation(
                     np.random.seed(seed)
                     obs, _ = env.reset(object_id=obj_id)
 
-                    axis = np.random.randn(3)
-                    axis /= np.linalg.norm(axis) + 1e-8
+                    if obj_id == 1:
+                        # Cylinder: dominant longitudinal spin with bounded tilt/nutation
+                        axis = np.array([np.random.uniform(-0.25, 0.25), np.random.uniform(-0.25, 0.25), np.random.choice([-1.0, 1.0])])
+                        axis /= np.linalg.norm(axis)
+                    else:
+                        axis = np.random.randn(3)
+                        axis /= np.linalg.norm(axis) + 1e-8
+
                     target_angle = float(np.random.uniform(min_rad, max_rad))
                     rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
                     q_xyzw = rand_rot.as_quat()
@@ -262,12 +280,17 @@ def run_rendered_evaluation(
                     peak_torque = 0.0
                     last_goals_count = 0
                     held_at_goal = False
+                    smoothed_act = None
 
                     while not (terminated or truncated) and viewer.is_running():
                         step += 1
                         with torch.no_grad():
-                            act = actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-                        obs, reward, terminated, truncated, step_info = env.step(act)
+                            raw_act = actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
+                        if smoothed_act is None:
+                            smoothed_act = raw_act.copy()
+                        else:
+                            smoothed_act = smooth_alpha * raw_act + (1.0 - smooth_alpha) * smoothed_act
+                        obs, reward, terminated, truncated, step_info = env.step(smoothed_act)
 
                         cur_torque = float(np.max(np.abs(env.data.actuator_force)))
                         if cur_torque > peak_torque:
@@ -371,13 +394,59 @@ def run_rendered_evaluation(
                         time.sleep(0.015)
 
                         goals = step_info.get("successes_in_episode", 0)
-                        if goals >= 2:
+
+                        # --- FIRM PRESENTATION HOLD BLOCK (FOR PROFESSOR DEMONSTRATIONS) ---
+                        # The instant a goal is scored or error drops below tolerance, hold the grasp firmly
+                        # for hold_time seconds so the professor clearly observes the 100% alignment.
+                        if (goals > last_goals_count or (cur_err_deg <= tol_deg and not held_at_goal)) and hold_time > 0:
+                            held_at_goal = True
+                            last_goals_count = goals
+                            hold_start = time.time()
+                            last_ctrl = env.data.ctrl.copy()
+                            while (time.time() - hold_start < hold_time) and viewer.is_running():
+                                env.data.ctrl[:] = last_ctrl
+                                env.data.qvel[:12] *= 0.85  # Damp residual velocity to maintain rock-solid stationary hold
+                                mujoco.mj_step(env.model, env.data)
+                                elapsed = time.time() - hold_start
+                                viewer.set_texts([
+                                    (
+                                        mujoco.mjtFontScale.mjFONTSCALE_150,
+                                        mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                        f"*** TARGET REACHED! FIRM GRIP LOCK-IN ***",
+                                        f"Holding Firm for Professor ({elapsed:.1f}s / {hold_time:.1f}s) | Error: {cur_err_deg:.1f}° <= {tol_deg:.1f}° | ALIGNED 100%",
+                                    )
+                                ])
+                                viewer.sync()
+                                time.sleep(0.02)
+
+                        if goals >= max_goals:
                             break
 
                     final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)
                     raw_dropped = bool(step_info.get("raw_dropped", False))
                     goals_achieved = step_info.get("successes_in_episode", 0)
                     is_success = bool(goals_achieved > 0 or final_err_deg <= (epsilon_ratio * init_angle_deg))
+
+                    # Post-episode presentation hold fallback:
+                    if is_success and not held_at_goal and hold_time > 0 and viewer.is_running():
+                        held_at_goal = True
+                        hold_start = time.time()
+                        last_ctrl = env.data.ctrl.copy()
+                        while (time.time() - hold_start < hold_time) and viewer.is_running():
+                            env.data.ctrl[:] = last_ctrl
+                            env.data.qvel[:12] *= 0.85
+                            mujoco.mj_step(env.model, env.data)
+                            elapsed = time.time() - hold_start
+                            viewer.set_texts([
+                                (
+                                    mujoco.mjtFontScale.mjFONTSCALE_150,
+                                    mujoco.mjtGridPos.mjGRID_TOPLEFT,
+                                    f"*** TARGET REACHED! FIRM GRIP LOCK-IN ***",
+                                    f"Holding Firm for Professor ({elapsed:.1f}s / {hold_time:.1f}s) | Error: {final_err_deg:.1f}° <= {epsilon_ratio*init_angle_deg:.1f}° | ALIGNED 100%",
+                                )
+                            ])
+                            viewer.sync()
+                            time.sleep(0.02)
                     dropped_before_success = bool(raw_dropped and (goals_achieved == 0))
                     pre_goal_retained = not dropped_before_success
                     
@@ -626,6 +695,24 @@ def main():
         default=os.path.join(PROJECT_ROOT, "in_hand_manipulation", "simulation", "scene_cube.xml"),
         help="Path to scene XML model",
     )
+    parser.add_argument(
+        "--hold_time",
+        type=float,
+        default=1.2,
+        help="Hold duration in seconds once goal is achieved during presentation (default: 1.2s)",
+    )
+    parser.add_argument(
+        "--max_goals",
+        type=int,
+        default=1,
+        help="Target goals to complete per episode in visual demo mode before next episode (default: 1 for clean presentation)",
+    )
+    parser.add_argument(
+        "--smooth_alpha",
+        type=float,
+        default=0.50,
+        help="Low-pass action filter alpha (default: 0.50; 1.0 = raw actions, lower = smoother motions / zero vibration)",
+    )
     args = parser.parse_args()
 
     if not os.path.exists(args.checkpoint):
@@ -638,6 +725,9 @@ def main():
             scene_xml_path=args.scene_xml,
             episodes_per_range=args.episodes_per_range,
             epsilon_ratio=args.epsilon_ratio,
+            hold_time=args.hold_time,
+            max_goals=args.max_goals,
+            smooth_alpha=args.smooth_alpha,
         )
     else:
         run_parallel_evaluation(

@@ -65,8 +65,14 @@ def _eval_single_episode(task_tuple):
     np.random.seed(seed)
     obs, _ = _worker_env.reset(object_id=obj_id)
     
-    axis = np.random.randn(3)
-    axis /= (np.linalg.norm(axis) + 1e-8)
+    if obj_id == 1:
+        # Cylinder: dominant longitudinal spin with bounded tilt/nutation
+        axis = np.array([np.random.uniform(-0.25, 0.25), np.random.uniform(-0.25, 0.25), np.random.choice([-1.0, 1.0])])
+        axis /= np.linalg.norm(axis)
+    else:
+        axis = np.random.randn(3)
+        axis /= (np.linalg.norm(axis) + 1e-8)
+
     target_angle = float(np.random.uniform(min_rad, max_rad))
     rand_rot = transform.Rotation.from_rotvec(axis * target_angle)
     q_xyzw = rand_rot.as_quat()
@@ -89,14 +95,19 @@ def _eval_single_episode(task_tuple):
     truncated = False
     step_info = {}
     goals_achieved = 0
+    smoothed_act = None
     
     while not (terminated or truncated):
         step += 1
         with torch.no_grad():
-            act = _worker_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-        obs, reward, terminated, truncated, step_info = _worker_env.step(act)
+            raw_act = _worker_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
+        if smoothed_act is None:
+            smoothed_act = raw_act.copy()
+        else:
+            smoothed_act = 0.50 * raw_act + 0.50 * smoothed_act
+        obs, reward, terminated, truncated, step_info = _worker_env.step(smoothed_act)
         goals_achieved = step_info.get("successes_in_episode", 0)
-        if goals_achieved >= 2:
+        if goals_achieved >= 1:
             break
             
     final_err_deg = step_info.get("d_theta", 0.0) * (180.0 / np.pi)

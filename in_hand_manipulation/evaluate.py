@@ -64,15 +64,17 @@ RANGE_DEFINITIONS = [
 _w_actor = None
 _w_env = None
 _w_epsilon_ratio = 0.10
+_w_smooth_alpha = 1.0
 
 
-def _worker_init(state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio):
-    global _w_actor, _w_env, _w_epsilon_ratio
+def _worker_init(state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio, smooth_alpha=1.0):
+    global _w_actor, _w_env, _w_epsilon_ratio, _w_smooth_alpha
     torch.set_num_threads(1)
     _w_actor = ActorNetwork(obs_dim=39, act_dim=12)
     _w_actor.load_state_dict(state_dict, strict=False)
     _w_actor.eval()
     _w_epsilon_ratio = epsilon_ratio
+    _w_smooth_alpha = smooth_alpha
     _w_env = DeltoInHandManipulationEnv(
         scene_xml_path=scene_xml_path,
         obs_mean=obs_mean,
@@ -131,11 +133,15 @@ def _eval_single_task(task_args):
         step += 1
         with torch.no_grad():
             raw_act = _w_actor(torch.from_numpy(obs).float().unsqueeze(0)).squeeze(0).numpy()
-        if smoothed_act is None:
-            smoothed_act = raw_act.copy()
+        if _w_smooth_alpha >= 1.0:
+            act_to_step = raw_act
         else:
-            smoothed_act = 0.50 * raw_act + 0.50 * smoothed_act
-        obs, reward, terminated, truncated, step_info = _w_env.step(smoothed_act)
+            if smoothed_act is None:
+                smoothed_act = raw_act.copy()
+            else:
+                smoothed_act = _w_smooth_alpha * raw_act + (1.0 - _w_smooth_alpha) * smoothed_act
+            act_to_step = smoothed_act
+        obs, reward, terminated, truncated, step_info = _w_env.step(act_to_step)
         
         cur_torque = float(np.max(np.abs(_w_env.data.actuator_force)))
         if cur_torque > peak_torque:
@@ -493,12 +499,13 @@ def run_parallel_evaluation(
     episodes_per_range: int = 100,
     num_workers: int = 16,
     epsilon_ratio: float = 0.10,
+    smooth_alpha: float = 1.0,
 ):
     """High-speed headless multi-worker evaluation across both angle ranges."""
     print(f"\n[Parallel Evaluator] Loading Checkpoint: {checkpoint_path}")
     print(f"  Protocol: {episodes_per_range} episodes per range × 2 ranges × 3 objects = {episodes_per_range * 6} total episodes")
     print(f"  Target Precision Envelope: {epsilon_ratio*100:.1f}% relative error tolerance")
-    print(f"  Workers: {num_workers} parallel CPU processes\n")
+    print(f"  Workers: {num_workers} parallel CPU processes | Smooth Alpha: {smooth_alpha:.2f}\n")
 
     payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     state_dict = payload.get("actor_state_dict", payload.get("model_state_dict"))
@@ -516,7 +523,7 @@ def run_parallel_evaluation(
                 tasks.append((seed, r_id, obj_id, min_rad, max_rad))
 
     t_start = time.time()
-    init_args = (state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio)
+    init_args = (state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio, smooth_alpha)
     ctx = mp.get_context("spawn")
 
     print(f"Starting parallel execution of {len(tasks)} benchmark episodes...")
@@ -633,7 +640,7 @@ def generate_metric_report(results, epsilon_ratio: float, checkpoint_path: str):
     lines.append(f"{'Evaluation Metric':<35} | {'Range 1 (10°-40°)':<20} | {'Range 2 (40°-90°)':<20} | {'Grand Total':<15}")
     lines.append("-" * 96)
     lines.append(f"{'Total Evaluated Episodes':<35} | {r1_total['n']:<20d} | {r2_total['n']:<20d} | {grand_total['n']:<15d}")
-    lines.append(f"{'Success Rate (@10% Error)':<35} | {r1_total['succ_rate']:<19.1f}% | {r2_total['succ_rate']:<19.1f}% | {grand_total['succ_rate']:<14.1f}%")
+    lines.append(f"{f'Success Rate (@{epsilon_ratio*100:.1f}% Error)':<35} | {r1_total['succ_rate']:<19.1f}% | {r2_total['succ_rate']:<19.1f}% | {grand_total['succ_rate']:<14.1f}%")
     lines.append(f"{'Mean Rotational Closure':<35} | {r1_total['clos_mean']:<19.1f}% | {r2_total['clos_mean']:<19.1f}% | {grand_total['clos_mean']:<14.1f}%")
     lines.append(f"{'Pre-Goal Retention Rate':<35} | {r1_total['pre_ret_rate']:<19.1f}% | {r2_total['pre_ret_rate']:<19.1f}% | {grand_total['pre_ret_rate']:<14.1f}%")
     lines.append(f"{'Pre-Goal Drop Rate':<35} | {r1_total['pre_drop_rate']:<19.1f}% | {r2_total['pre_drop_rate']:<19.1f}% | {grand_total['pre_drop_rate']:<14.1f}%")
@@ -710,8 +717,8 @@ def main():
     parser.add_argument(
         "--smooth_alpha",
         type=float,
-        default=0.50,
-        help="Low-pass action filter alpha (default: 0.50; 1.0 = raw actions, lower = smoother motions / zero vibration)",
+        default=1.0,
+        help="Action filter alpha (default: 1.0 = raw policy actions for peak benchmark accuracy; e.g. 0.50 = exponential smoothing for jitter-free visual rendering)",
     )
     args = parser.parse_args()
 
@@ -736,6 +743,7 @@ def main():
             episodes_per_range=args.episodes_per_range,
             num_workers=args.num_workers,
             epsilon_ratio=args.epsilon_ratio,
+            smooth_alpha=args.smooth_alpha,
         )
 
 

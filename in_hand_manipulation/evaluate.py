@@ -319,13 +319,6 @@ def run_rendered_evaluation(
 
                     half_height = 0.045 if obj_id == 2 else 0.07
 
-                    # Fixed Target Coordinate Frame Anchor:
-                    # Initialized once at episode start above the initial object grasp and remains strictly FIXED throughout the episode
-                    init_obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
-                    init_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
-                    init_rot = transform.Rotation.from_quat([init_q[1], init_q[2], init_q[3], init_q[0]])
-                    fixed_target_base = init_obj_pos + init_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
-
                     step = 0
                     terminated = False
                     truncated = False
@@ -352,57 +345,40 @@ def run_rendered_evaluation(
                         cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
                         tol_deg = float(epsilon_ratio * init_angle_deg)
 
-                        # Real-time visual orientation arrows:
-                        # - GREEN (3 Orthogonal Coordinate Arrows): STRICTLY FIXED in space at fixed_target_base
-                        # - BLUE (3 Orthogonal Coordinate Arrows): ATTACHED to moving object at moving_obj_base
+                        # Real-time visual orientation arrow:
+                        # Exactly ONE green arrow representing target orientation.
+                        # It does NOT change direction (constant target vector in world space) but MOVES with the object.
                         try:
                             obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
                             cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
                             cur_rot = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]])
-                            moving_obj_base = obj_pos + cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
+                            # Anchor on top face of the object (moves with object)
+                            base_point = obj_pos + cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
 
+                            # Target orientation direction in world frame (constant throughout episode)
                             tgt_q = env.target_quat
                             tgt_rot = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]])
+                            tgt_dir = tgt_rot.apply(np.array([0.0, 0.0, 1.0]))
 
-                            # Sleek, reduced arrow widths and lengths
-                            rad_tgt = 0.0030  # Sleek radius for fixed target axes (diameter 6mm)
-                            rad_cur = 0.0025  # Sleek radius for moving object axes (diameter 5mm)
-                            len_tgt = 0.12    # Target axes slightly longer so they remain visible when aligned
-                            len_cur = 0.10    # Object body axes
+                            arrow_len = 0.15
+                            arrow_rad = 0.0035
+                            tip_pos = base_point + arrow_len * tgt_dir
 
                             with viewer.lock():
                                 viewer.user_scn.ngeom = 0
 
-                                # 1. FIXED TARGET ORIENTATION AXIS (3 ARROWS IN GREEN)
-                                _add_user_sphere(viewer.user_scn, fixed_target_base, 0.0045, [0.15, 0.90, 0.20, 1.0])
-                                target_axes_spec = [
-                                    (np.array([1.0, 0.0, 0.0]), [0.35, 1.00, 0.35, 0.95]),  # Target X (Lime Green)
-                                    (np.array([0.0, 1.0, 0.0]), [0.15, 0.90, 0.20, 0.95]),  # Target Y (Emerald Green)
-                                    (np.array([0.0, 0.0, 1.0]), [0.00, 0.75, 0.10, 0.95]),  # Target Z (Forest Green)
-                                ]
-                                for axis_vec, rgba in target_axes_spec:
-                                    dir_vec = tgt_rot.apply(axis_vec)
-                                    tip_pos = fixed_target_base + len_tgt * dir_vec
-                                    _add_user_arrow(viewer.user_scn, fixed_target_base, tip_pos, rad_tgt, rgba)
+                                # Small anchor hub on object top marker
+                                _add_user_sphere(viewer.user_scn, base_point, 0.0045, [1.0, 0.85, 0.0, 1.0])
 
-                                # 2. MOVING OBJECT ORIENTATION (3 ARROWS IN BLUE ATTACHED TO OBJECT)
-                                _add_user_sphere(viewer.user_scn, moving_obj_base, 0.0038, [0.20, 0.60, 1.00, 1.0])
-                                object_axes_spec = [
-                                    (np.array([1.0, 0.0, 0.0]), [0.40, 0.75, 1.00, 0.95]),  # Object X (Sky Blue)
-                                    (np.array([0.0, 1.0, 0.0]), [0.15, 0.50, 0.95, 0.95]),  # Object Y (Royal Blue)
-                                    (np.array([0.0, 0.0, 1.0]), [0.00, 0.25, 0.85, 0.95]),  # Object Z (Navy Blue)
-                                ]
-                                for axis_vec, rgba in object_axes_spec:
-                                    dir_vec = cur_rot.apply(axis_vec)
-                                    tip_pos = moving_obj_base + len_cur * dir_vec
-                                    _add_user_arrow(viewer.user_scn, moving_obj_base, tip_pos, rad_cur, rgba)
+                                # Exactly ONE Green Arrow: Target Orientation (constant direction, moves with object)
+                                _add_user_arrow(viewer.user_scn, base_point, tip_pos, arrow_rad, [0.05, 1.0, 0.05, 1.0])
 
                             # Overlay real-time HUD telemetry on passive viewer
                             viewer.set_texts([
                                 (
                                     mujoco.mjtFontScale.mjFONTSCALE_150,
                                     mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                    f"BLUE (3 Axes): Current Object | GREEN (3 Axes): Target (Fixed) | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
+                                    f"GREEN Arrow: Target Orientation (Moves with Object) | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
                                     f"Err: {cur_err_deg:.1f}° (Tol: {tol_deg:.1f}°) | Goals: {step_info.get('successes_in_episode', 0)} | Step: {step}",
                                 )
                             ])

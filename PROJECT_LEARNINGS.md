@@ -164,12 +164,11 @@ The robotics literature often evaluates orientation tasks using loose absolute e
   * The instant the object error falls below tolerance, the controller locks fingertip control torques (`env.data.ctrl[:] = last_ctrl`) and damps residual joint velocities (`qvel[:12] *= 0.85`).
   * The gripper holds the object rock-solid in the target orientation for $\ge 1.5$ continuous seconds while displaying a live HUD countdown before completing the episode.
 
-### 5.3 Interactive 3D Visual Feedback & Triad Coordinate Frames
-* Integrated sleek multi-axis visual cues directly into MuJoCo's user decorative scene (`user_scn`):
-  * **Sleek Arrow Dimensions**: Reduced width from bulky $10\text{ mm}$ to sleek $2.5\text{--}3.0\text{ mm}$ radius for crisp, non-obtrusive viewing.
-  * **Moving Object Orientation (3 Arrows in Blue)**: A 3-axis orthogonal coordinate triad (X: sky blue, Y: royal blue, Z: navy blue) attached to the top face of the moving object, rotating and translating with the object in real time.
-  * **Target Orientation Coordinate Axis (3 Arrows in Green)**: A 3-axis orthogonal coordinate triad (X: lime green, Y: emerald green, Z: forest green) anchored at the initial grasp top position, remaining **strictly fixed throughout the episode**.
-  * **Visual Alignment Convergence**: When the object reaches the target orientation in hand, the blue object triad directly coincides with the stationary green target triad.
+### 5.3 Interactive 3D Visual Feedback & Target Orientation Indicator
+* Integrated sleek visual orientation cues directly into MuJoCo's user decorative scene (`user_scn`):
+  * **Single Green Target Arrow**: Anchored directly to the top face of the moving object, translating and following the object in real time while maintaining a strictly constant 3D target orientation direction in world space throughout the episode.
+  * **Zero Clutter**: Exactly one sleek green arrow (radius $3.5\text{ mm}$, length $15\text{ cm}$) and a small gold hub sphere; eliminates all visual clutter.
+  * **Visual Alignment Convergence**: As the hand manipulates the object, alignment is immediately intuitive: when the object's top surface normal aligns with the green arrow, the orientation error converges to $0.0^\circ$.
   * **Real-time HUD**: Displays instantaneous error in degrees, target tolerance threshold, goal count, and hold countdown.
 
 ---

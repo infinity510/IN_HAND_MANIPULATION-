@@ -46,7 +46,7 @@ def _init_eval_worker(
     max_goal_angle,
     min_goal_angle,
     epsilon_ratio,
-    smooth_alpha=0.70,
+    smooth_alpha=0.50,
     sim2real_dr=False,
     action_delay_max=1,
     vision_delay_max=2,
@@ -165,7 +165,7 @@ def evaluate_checkpoint(
     max_goal_angle: float,
     min_goal_angle: float,
     epsilon_ratio: float,
-    smooth_alpha: float = 0.70,
+    smooth_alpha: float = 0.50,
     sim2real_dr: bool = False,
     action_delay_max: int = 1,
     vision_delay_max: int = 2,
@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--max_goal_angle", type=float, default=1.57, help="Max target rotation angle in radians")
     parser.add_argument("--min_goal_angle", type=float, default=0.15, help="Min target rotation angle in radians")
     parser.add_argument("--epsilon_ratio", type=float, default=0.10, help="Target relative error threshold (default: 0.10)")
-    parser.add_argument("--smooth_alpha", type=float, default=0.70, help="Action smoothing alpha (default: 0.70)")
+    parser.add_argument("--smooth_alpha", type=float, default=0.50, help="Action smoothing alpha (default: 0.50)")
     parser.add_argument("--delete_checkpoints", action="store_true", default=False, help="Delete intermediate milestone checkpoints after evaluation")
     parser.add_argument("--stop_flag", type=str, default="", help="Stop flag file path indicating training has completed")
     parser.add_argument("--best_output", type=str, default="", help="Destination path for best actor checkpoint")
@@ -278,6 +278,7 @@ def main():
     parser.add_argument("--vision_delay_max", type=int, default=2, help="Max ArUco vision latency steps (default: 2 -> 40ms)")
     parser.add_argument("--obs_noise_scale", type=float, default=0.80, help="Observation noise scale factor (default: 0.80)")
     parser.add_argument("--dr_ratio", type=float, default=0.30, help="Domain randomization ratio (default: 0.30)")
+    parser.add_argument("--min_promote_score", type=float, default=0.7050, help="Minimum benchmark score required to promote to best_model/best_model.pth (default: 0.7050)")
     args = parser.parse_args()
     
     watch_dir = os.path.abspath(args.watch_dir)
@@ -429,6 +430,7 @@ def main():
                             smooth_alpha=args.smooth_alpha,
                             sim2real_dr=args.sim2real_dr,
                             action_delay_max=args.action_delay_max,
+                            vision_delay_max=args.vision_delay_max,
                             obs_noise_scale=args.obs_noise_scale,
                             dr_ratio=args.dr_ratio,
                         )
@@ -442,23 +444,28 @@ def main():
                             best_iter = it
                             shutil.copy2(ckpt_file, best_output)
                             champion_dir = os.path.join(PROJECT_ROOT, "best_model")
-                            if args.update_global_best and os.path.exists(champion_dir):
+                            if args.update_global_best and os.path.exists(champion_dir) and score >= args.min_promote_score:
                                 try:
                                     champion_path = os.path.join(champion_dir, "best_model.pth")
                                     shutil.copy2(ckpt_file, champion_path)
                                     readme_path = os.path.join(champion_dir, "README.md")
                                     with open(readme_path, "w") as rf:
-                                        rf.write("# Best Champion Model (Stratified In-Hand Manipulation)\n\n")
-                                        rf.write(f"- **Checkpoint File**: `best_model.pth`\n")
+                                        rf.write("# Champion Production Models (Delto In-Hand Manipulation)\n\n")
+                                        rf.write("This directory contains the two primary champion models for the Delto 12-DOF hand:\n\n---\n\n")
+                                        rf.write("## 1. Ideal Case Champion: `best_model_clean.pth`\n\n")
+                                        rf.write("- **Purpose**: Ideal / Nominal Physics baseline.\n")
+                                        rf.write("- **Conditions**: Zero observation noise, zero latency, nominal friction, nominal geometry.\n")
+                                        rf.write("- **Use Case**: Clean visual demonstration, video recordings, presentation figures, nominal baseline.\n\n---\n\n")
+                                        rf.write("## 2. Sim-to-Real Domain Randomization Champion: `best_model.pth`\n\n")
                                         rf.write(f"- **Source**: Iteration {it} (Promoted via Close-Contender Re-evaluation)\n")
-                                        rf.write(f"- **Target Precision Envelope**: 10.0% Relative Error Tolerance across 10° to 90° Envelope\n")
-                                        rf.write(f"- **Overall Benchmark Score**: {score:.4f}\n")
-                                        rf.write(f"- **Overall Success Rate (@10% Error)**: {succ:.1f}%\n")
-                                        rf.write(f"- **Overall Rotational Closure**: {clos:.1f}%\n")
-                                        rf.write(f"- **Overall Pre-Goal Retention**: {pre_ret:.1f}%\n\n")
-                                        rf.write(f"### Stratified Angle Range Breakdown\n")
-                                        rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: {metrics['r1_succ']*100:.1f}% Success | {metrics['r1_clos']*100:.1f}% Closure | {metrics['r1_ret']*100:.1f}% Retention\n")
-                                        rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: {metrics['r2_succ']*100:.1f}% Success | {metrics['r2_clos']*100:.1f}% Closure | {metrics['r2_ret']*100:.1f}% Retention\n")
+                                        rf.write(f"- **Action Smoothing Filter**: Exponential low-pass filter ($\\alpha = {args.smooth_alpha:.2f}$) on 50 Hz control\n")
+                                        rf.write(f"- **Sim-to-Real Envelope**: ArUco latency 20-40ms, CAN bus delay 0-20ms, sensor noise 0.80, silicone friction +-30%\n")
+                                        rf.write(f"- **Overall Benchmark Score (@{active_eps*100:.1f}% Tol)**: **`{score:.4f}`**\n")
+                                        rf.write(f"- **Overall Success Rate**: **`{succ:.1f}%`**\n")
+                                        rf.write(f"- **Overall Rotational Closure**: **`{clos:.1f}%`**\n")
+                                        rf.write(f"- **Overall Pre-Goal Retention**: **`{pre_ret:.1f}%`**\n")
+                                        rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: **`{metrics['r1_succ']*100:.1f}%` Success** | **`{metrics['r1_clos']*100:.1f}%` Closure**\n")
+                                        rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: **`{metrics['r2_succ']*100:.1f}%` Success** | **`{metrics['r2_clos']*100:.1f}%` Closure**\n")
                                         rf.write(f"- **Last Updated**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                                 except Exception as ce:
                                     print(f"  [Champion Update Warning]: {ce}", flush=True)
@@ -475,23 +482,28 @@ def main():
                     shutil.copy2(ckpt_file, best_output)
                     # Automatically update global champion repository
                     champion_dir = os.path.join(PROJECT_ROOT, "best_model")
-                    if args.update_global_best and os.path.exists(champion_dir):
+                    if args.update_global_best and os.path.exists(champion_dir) and score >= args.min_promote_score:
                         try:
                             champion_path = os.path.join(champion_dir, "best_model.pth")
                             shutil.copy2(ckpt_file, champion_path)
                             readme_path = os.path.join(champion_dir, "README.md")
                             with open(readme_path, "w") as rf:
-                                rf.write("# Best Champion Model (Stratified In-Hand Manipulation)\n\n")
-                                rf.write(f"- **Checkpoint File**: `best_model.pth`\n")
-                                rf.write(f"- **Source**: Iteration {it}\n")
-                                rf.write(f"- **Target Precision Envelope**: {active_eps*100:.1f}% Relative Error Tolerance across 10° to 90° Envelope\n")
-                                rf.write(f"- **Overall Benchmark Score**: {score:.4f}\n")
-                                rf.write(f"- **Overall Success Rate (@{active_eps*100:.1f}% Error)**: {succ:.1f}%\n")
-                                rf.write(f"- **Overall Rotational Closure**: {clos:.1f}%\n")
-                                rf.write(f"- **Overall Pre-Goal Retention**: {pre_ret:.1f}%\n\n")
-                                rf.write(f"### Stratified Angle Range Breakdown\n")
-                                rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: {metrics['r1_succ']*100:.1f}% Success | {metrics['r1_clos']*100:.1f}% Closure | {metrics['r1_ret']*100:.1f}% Retention\n")
-                                rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: {metrics['r2_succ']*100:.1f}% Success | {metrics['r2_clos']*100:.1f}% Closure | {metrics['r2_ret']*100:.1f}% Retention\n")
+                                rf.write("# Champion Production Models (Delto In-Hand Manipulation)\n\n")
+                                rf.write("This directory contains the two primary champion models for the Delto 12-DOF hand:\n\n---\n\n")
+                                rf.write("## 1. Ideal Case Champion: `best_model_clean.pth`\n\n")
+                                rf.write("- **Purpose**: Ideal / Nominal Physics baseline.\n")
+                                rf.write("- **Conditions**: Zero observation noise, zero latency, nominal friction, nominal geometry.\n")
+                                rf.write("- **Use Case**: Clean visual demonstration, video recordings, presentation figures, nominal baseline.\n\n---\n\n")
+                                rf.write("## 2. Sim-to-Real Domain Randomization Champion: `best_model.pth`\n\n")
+                                rf.write(f"- **Source**: Iteration {it} (Promoted by Background Evaluator)\n")
+                                rf.write(f"- **Action Smoothing Filter**: Exponential low-pass filter ($\\alpha = {args.smooth_alpha:.2f}$) on 50 Hz control\n")
+                                rf.write(f"- **Sim-to-Real Envelope**: ArUco latency 20-40ms, CAN bus delay 0-20ms, sensor noise 0.80, silicone friction +-30%\n")
+                                rf.write(f"- **Overall Benchmark Score (@{active_eps*100:.1f}% Tol)**: **`{score:.4f}`**\n")
+                                rf.write(f"- **Overall Success Rate**: **`{succ:.1f}%`**\n")
+                                rf.write(f"- **Overall Rotational Closure**: **`{clos:.1f}%`**\n")
+                                rf.write(f"- **Overall Pre-Goal Retention**: **`{pre_ret:.1f}%`**\n")
+                                rf.write(f"- **Range 1 (10° to 40° Small/Medium)**: **`{metrics['r1_succ']*100:.1f}%` Success** | **`{metrics['r1_clos']*100:.1f}%` Closure**\n")
+                                rf.write(f"- **Range 2 (40° to 90° Large Gaiting)**: **`{metrics['r2_succ']*100:.1f}%` Success** | **`{metrics['r2_clos']*100:.1f}%` Closure**\n")
                                 rf.write(f"- **Last Updated**: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                         except Exception as ce:
                             print(f"  [Champion Update Warning]: {ce}", flush=True)

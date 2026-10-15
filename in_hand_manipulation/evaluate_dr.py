@@ -273,7 +273,7 @@ def run_rendered_evaluation(
     dr_ratio: float = 0.30,
     hold_time: float = 1.2,
     max_goals: int = 1,
-    smooth_alpha: float = 0.70,
+    smooth_alpha: float = 0.50,
     sample_mode: str = "shuffle",
     report_file: str = "EVALUATION_DR_REPORT.md",
 ):
@@ -525,7 +525,7 @@ def run_parallel_evaluation(
     episodes_per_range: int = 100,
     num_workers: int = 16,
     epsilon_ratio: float = 0.10,
-    smooth_alpha: float = 0.70,
+    smooth_alpha: float = 0.50,
     sample_mode: str = "shuffle",
     action_delay_max: int = 1,
     vision_delay_max: int = 2,
@@ -648,7 +648,7 @@ def generate_metric_report(results, epsilon_ratio: float, checkpoint_path: str, 
 
     action_delay_max = dr_info.get("action_delay_max", 1)
     vision_delay_max = dr_info.get("vision_delay_max", 2)
-    smooth_alpha = dr_info.get("smooth_alpha", 0.70)
+    smooth_alpha = dr_info.get("smooth_alpha", 0.50)
     obs_noise_scale = dr_info.get("obs_noise_scale", 0.80)
     dr_ratio = dr_info.get("dr_ratio", 0.30)
 
@@ -828,8 +828,8 @@ def main():
     parser.add_argument(
         "--smooth_alpha",
         type=float,
-        default=0.70,
-        help="Action filter alpha (default: 0.70 exponential smoothing filter)",
+        default=0.50,
+        help="Action filter alpha (default: 0.50 exponential smoothing filter)",
     )
     parser.add_argument(
         "--sample_mode",
@@ -838,11 +838,12 @@ def main():
         choices=["shuffle", "random", "sequential"],
         help="Object sampling mode across episodes: 'shuffle' (randomized stratified permutation, default)",
     )
+    default_report = os.path.join(PROJECT_ROOT, "EVAL", "EVALUATION_DR_REPORT.md") if os.path.isdir(os.path.join(PROJECT_ROOT, "EVAL")) else "EVALUATION_DR_REPORT.md"
     parser.add_argument(
         "--report_file",
         type=str,
-        default="EVALUATION_DR_REPORT.md",
-        help="Output report markdown file path (default: EVALUATION_DR_REPORT.md)",
+        default=default_report,
+        help="Output report markdown file path (default: EVAL/EVALUATION_DR_REPORT.md)",
     )
     parser.add_argument(
         "--seed",

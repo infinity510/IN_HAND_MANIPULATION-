@@ -83,12 +83,12 @@ class RewardWeights:
     w2: float = 0.001   # Control penalty weight: penalizes large torque / action norms ||a_t||^2
     w_action_rate: float = 0.035 # Action rate penalty weight: penalizes high-frequency finger tremor ||a_t - a_{t-1}||^2 (curbs vibration without freezing motion)
     w3: float = 0.0001  # Velocity penalty weight: prevents actuator thrashing ||qdot_t||^2
-    w4: float = 100.0   # Terminal success bonus: large positive reward upon holding goal orientation
-    w5: float = 80.0    # Catastrophic drop penalty: prevents suicide shortcut
+    w4: float = 250.0   # Terminal success bonus: large positive reward upon holding goal orientation
+    w5: float = 90.0    # Catastrophic drop penalty: prevents suicide shortcut
     w6: float = 0.00    # Proportional contact reward: 0.0 to prevent passive clamping trap
     w7: float = 0.20    # Zero contact penalty: relaxed penalty when contact points momentarily drop during gaiting
     w_alive: float = 0.80 # Grasp survival / retention reward: continuous positive reward while object is safely in hand
-    w_step_penalty: float = 0.00 # Flat step penalty: set to 0.00 to prevent suicidal agent trap
+    w_step_penalty: float = 0.15 # Urgency step penalty outside tolerance to break idle holding equilibria
     w_angvel_brake: float = 0.50 # Object angular velocity braking penalty weight near target
     w_anti_stall: float = 0.25   # Anti-stall motion penalty weight when object freezes outside target
     w_lock_bonus: float = 0.50   # Precision grasp lock-in bonus weight for multi-point contact at goal
@@ -185,7 +185,7 @@ class PPOConfig:
     sim2real_dr: bool = False       # If True, enables full sim-to-real domain randomization
     action_delay_max: int = 1       # Maximum action delay in steps (default: 1 step = 20ms)
     vision_delay_max: int = 2       # Maximum ArUco vision delay in steps (default: 2 steps = 40ms camera+detection latency)
-    smooth_alpha: float = 0.70      # Exponential action smoothing alpha under sim-to-real (default: 0.70)
+    smooth_alpha: float = 0.50      # Exponential action smoothing alpha under sim-to-real (default: 0.50)
     obs_noise_scale: float = 1.0    # Observation noise scaling factor
     plateau_window: int = 2500      # Window of iterations without improvement to trigger plateau breaker
     plateau_breaker: bool = True    # If True, escalates difficulty upon 2500-iter plateau
@@ -222,7 +222,7 @@ class DeltoInHandManipulationEnv:
         sim2real_dr: bool = False,
         action_delay_max: int = 1,
         vision_delay_max: int = 2,
-        smooth_alpha: float = 0.70,
+        smooth_alpha: float = 0.50,
         obs_noise_scale: float = 1.0,
     ):
         if not os.path.exists(scene_xml_path):
@@ -367,7 +367,7 @@ class DeltoInHandManipulationEnv:
         
         # Stratified Mixture Curriculum Sampling:
         # 50% small-to-medium anchor envelope (10° to 40° = 0.1745 to 0.6981 rad)
-        # 50% large gaiting frontier envelope (40° to 90° = 0.6981 to 1.5708 rad) for Stage 2 mastery
+        # 50% large gaiting frontier envelope (40° to 90° = 0.6981 to 1.5708 rad)
         if np.random.uniform(0.0, 1.0) < 0.50:
             r_max = min(max_angle, 0.6981)
             angle = float(np.random.uniform(min_angle, max(min_angle, r_max)))
@@ -700,8 +700,8 @@ class DeltoInHandManipulationEnv:
         # Plus an additional quadratic precision boost when entering sub-15% error (step_closure > 0.85)
         # creating a steep funnel pulling the policy directly into the >=95% closure zone.
         closure_reward = w.w1 * (step_closure ** 2 + 0.5 * (step_closure ** 4))
-        if step_closure > 0.75:
-            closure_reward += 4.0 * float(((step_closure - 0.75) / 0.25) ** 2)
+        if step_closure > 0.60:
+            closure_reward += 4.0 * float(((step_closure - 0.60) / 0.40) ** 2)
         
         # (a1) Pure Angular Progress Reward with Asymmetric Goal Acceleration:
         # Full accelerating progress on positive rotation toward target.
@@ -721,16 +721,19 @@ class DeltoInHandManipulationEnv:
         wide_funnel = float(np.exp(- min(4.0, rel_error / 0.15)))
         tight_core = float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
         
+        # Continuous Approach Slope: Bridges the 20% -> 10% error gap to pull past the 12% stalling barrier
+        approach_slope = 5.0 * float(max(0.0, (2.0 * w.epsilon_ratio - rel_error) / (2.0 * w.epsilon_ratio)))
+        
         # Progressive Sub-Tolerance Super-Precision Reward:
         # When orientation error successfully drops below epsilon_ratio (e.g. 10%),
         # grant an escalating precision bonus as the hand drives error down further towards 5% and 0%!
         if rel_error < w.epsilon_ratio:
             further_reduction = float((w.epsilon_ratio - rel_error) / (w.epsilon_ratio + 1e-6))
-            sub_tol_bonus = 8.0 * (further_reduction ** 1.5)
+            sub_tol_bonus = 10.0 * (further_reduction ** 1.5)
         else:
             sub_tol_bonus = 0.0
 
-        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core + sub_tol_bonus
+        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core + approach_slope + sub_tol_bonus
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))
@@ -755,8 +758,21 @@ class DeltoInHandManipulationEnv:
         f2_distal_curl = post_qpos[6] + post_qpos[7]
         f3_distal_curl = post_qpos[10] + post_qpos[11]
         distal_flexions = np.array([f1_distal_curl, f2_distal_curl, f3_distal_curl], dtype=np.float32)
-        hyperflex_excess = np.maximum(0.0, distal_flexions - 2.20)  # threshold: ~126° total curl (permits normal cylinder wrap)
-        flat_shelf_penalty = 0.30 * float(np.sum(np.square(hyperflex_excess)))
+        # Strict Palm Avoidance & Flat-Shelf Support Regularization:
+        # Penalizes excessive curling of distal knuckles beyond 2.85 rad (~163°),
+        # permitting firm grasping of thin objects while preventing clenched-fist palm tucks:
+        hyperflex_excess = np.maximum(0.0, distal_flexions - 2.85)
+        flat_shelf_penalty = 2.0 * float(np.sum(np.square(hyperflex_excess)))
+        
+        # Fingertip Palm Clearance Protection:
+        # Ensures fingertips maintain at least 12mm vertical clearance above palm hearth:
+        tip_z_min = min(
+            self.data.xpos[self.model.body("gripper_f1_04_link").id][2],
+            self.data.xpos[self.model.body("gripper_f2_04_link").id][2],
+            self.data.xpos[self.model.body("gripper_f3_04_link").id][2]
+        )
+        palm_intrusion_excess = max(0.0, 0.012 - tip_z_min)
+        palm_clearance_penalty = 25.0 * (palm_intrusion_excess ** 2)
         
         # (c) Velocity Penalty: ||qdot_t||^2
         vel_norm_sq = float(np.sum(np.square(r_qvel)))
@@ -783,9 +799,17 @@ class DeltoInHandManipulationEnv:
         # (d) Distance from palm center & Palm Cradle Centering Stability Bonus
         dist_to_palm = float(np.linalg.norm(obj_pos - self.palm_position))
         xy_dist = float(np.linalg.norm(obj_pos[:2]))
-        z_dev = float(abs(obj_pos[2] - 0.10))
-        w_cradle = getattr(w, 'w_cradle_bonus', 0.40)
+        # Object-dependent natural resting center height:
+        # Cube (half-height 0.045) rests naturally at z ~ 0.065m.
+        # Cylinder and Cuboid (half-height 0.070) rest naturally at z ~ 0.095m.
+        target_z = 0.065 if self.active_object_id == 2 else 0.095
+        z_dev = float(abs(obj_pos[2] - target_z))
+        w_cradle = getattr(w, 'w_cradle_bonus', 0.55)
         cradle_bonus = w_cradle * float(np.exp(- ((xy_dist / 0.04) ** 2) - ((z_dev / 0.03) ** 2)))
+        
+        # Active Off-Center Drift Penalty: Prevents cylinder/cuboid from sliding laterally off palm
+        off_center_drift = float(max(0.0, xy_dist - 0.045))
+        centering_penalty = 2.5 * (off_center_drift ** 2)
         
         # (e) Contact points & Precision Lock-In Bonus
         n_c = self.count_contacts()
@@ -843,16 +867,17 @@ class DeltoInHandManipulationEnv:
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         # Survival reward scaled by rotational closure: prevents passive freezing in palm cradle
         base_alive = getattr(w, 'w_alive', 0.80)
-        # Dynamic Motion-Gating: If stationary outside goal (rel_error > 0.15 and ||omega_obj|| < 0.03), cut alive reward to 0.0!
-        is_stalled = bool(obj_angvel_norm < 0.03 and rel_error > 0.15)
+        # Dynamic Motion-Gating: If stationary or zero angular progress outside goal (rel_error > epsilon_ratio and (||omega|| < 0.04 or |progress| < 0.001)), cut alive reward to 0.0!
+        is_stalled = bool((obj_angvel_norm < 0.04 or abs(angular_progress) < 0.001) and rel_error > w.epsilon_ratio)
         alive_reward = 0.0 if (is_dropped or is_stalled) else float(base_alive * (0.25 + 0.75 * step_closure))
         
         # Anti-plateau urgency pressure on incomplete rotation:
-        # Prevents policy from idling at 40-80% closure to collect passive alive rewards.
-        # Gradually bleeds reward until target tolerance is reached (closure >= 95%).
-        closure_deficit_penalty = 0.20 * float(max(0.0, 0.95 - step_closure))
+        # Prevents policy from idling at 40-85% closure to collect passive alive rewards.
+        # Gently bleeds reward until target tolerance is reached (closure >= 1 - epsilon_ratio).
+        closure_deficit_penalty = 0.20 * float(max(0.0, (1.0 - w.epsilon_ratio) - step_closure))
         
-        step_cost = getattr(w, 'w_step_penalty', 0.00)
+        # Urgency step cost: penalizes time spent outside target tolerance to break idle holding equilibria
+        step_cost = getattr(w, 'w_step_penalty', 0.15 if (rel_error > w.epsilon_ratio) else 0.00)
         
         reward = (
             closure_reward
@@ -863,17 +888,19 @@ class DeltoInHandManipulationEnv:
             + cradle_bonus
             + enclosure_bonus
             + hold_bonus
+            - centering_penalty
             - slip_penalty
             - (w.w2 * control_norm_sq)
             - action_rate_penalty
             - joint_limit_penalty
             - flat_shelf_penalty
+            - palm_clearance_penalty
             - (w.w3 * vel_norm_sq)
             - angvel_damping
             - stall_penalty
             + term_success_bonus
             - drop_penalty
-            + (w.w6 * float(n_c))
+            + (w.w6 * float(min(n_c, 3)))
             - zero_contact_pen
             - closure_deficit_penalty
             - step_cost
@@ -1562,7 +1589,7 @@ class PPOFineTuner:
                 sim2real_dr=getattr(self.cfg, 'sim2real_dr', False),
                 action_delay_max=getattr(self.cfg, 'action_delay_max', 1),
                 vision_delay_max=getattr(self.cfg, 'vision_delay_max', 2),
-                smooth_alpha=getattr(self.cfg, 'smooth_alpha', 0.70),
+                smooth_alpha=getattr(self.cfg, 'smooth_alpha', 0.50),
                 obs_noise_scale=getattr(self.cfg, 'obs_noise_scale', 1.0),
             )
             
@@ -1993,7 +2020,7 @@ class PPOFineTuner:
                     cur_delay_max = min(1, getattr(self.cfg, 'action_delay_max', 1))
                     cur_vis_delay_max = min(2, getattr(self.cfg, 'vision_delay_max', 2))
                     cur_noise = min(1.0, getattr(self.cfg, 'obs_noise_scale', 0.80))
-                    cur_smooth = getattr(self.cfg, 'smooth_alpha', 0.70)
+                    cur_smooth = getattr(self.cfg, 'smooth_alpha', 0.50)
                     if iteration == self.cfg.start_iteration:
                         self.vec_env.set_action_delay_max(cur_delay_max)
                         self.vec_env.set_vision_delay_max(cur_vis_delay_max)
@@ -2278,12 +2305,12 @@ def parse_args():
     parser.add_argument("--w_progress", type=float, default=14.0, help="Accelerating angular progress reward weight (default: 14.0)")
     parser.add_argument("--w_precision", type=float, default=6.0, help="Multi-scale exponential precision guidance reward weight (default: 6.0)")
     parser.add_argument("--w_action_rate", type=float, default=0.035, help="Action rate smoothing penalty weight (default: 0.035)")
-    parser.add_argument("--w4", type=float, default=50.0, help="Terminal success bonus weight (default: 50.0)")
-    parser.add_argument("--w5", type=float, default=80.0, help="Early reset / drop penalty weight (default: 80.0)")
+    parser.add_argument("--w4", type=float, default=250.0, help="Terminal success bonus weight (default: 250.0)")
+    parser.add_argument("--w5", type=float, default=90.0, help="Early reset / drop penalty weight (default: 90.0)")
     parser.add_argument("--w6", type=float, default=0.00, help="Proportional contact reward weight (default: 0.00 to eliminate passive clamping)")
     parser.add_argument("--w7", type=float, default=0.20, help="Zero contact penalty weight (default: 0.20)")
     parser.add_argument("--w_alive", type=float, default=0.80, help="Grasp retention / survival reward weight (default: 0.80)")
-    parser.add_argument("--w_step_penalty", type=float, default=0.00, help="Step time penalty (default: 0.00)")
+    parser.add_argument("--w_step_penalty", type=float, default=0.15, help="Step time penalty (default: 0.15)")
     parser.add_argument("--w_angvel_brake", type=float, default=0.50, help="Object angular velocity braking weight near target (default: 0.50)")
     parser.add_argument("--w_anti_stall", type=float, default=0.25, help="Anti-stall penalty weight when stationary outside goal (default: 0.25)")
     parser.add_argument("--w_lock_bonus", type=float, default=0.50, help="Precision grasp lock-in bonus weight for multi-point contacts at goal (default: 0.50)")
@@ -2299,7 +2326,7 @@ def parse_args():
     parser.add_argument("--sim2real_dr", action="store_true", help="Enable sim-to-real domain randomization (action delay buffer, vision latency, observation noise, silicone friction jitter)")
     parser.add_argument("--action_delay_max", type=int, default=1, help="Max action delay in steps (default: 1 = 20ms)")
     parser.add_argument("--vision_delay_max", type=int, default=2, help="Max ArUco vision delay in steps (default: 2 = 40ms camera capture + pose estimation latency)")
-    parser.add_argument("--smooth_alpha", type=float, default=0.70, help="Exponential action smoothing alpha (default: 0.70)")
+    parser.add_argument("--smooth_alpha", type=float, default=0.50, help="Exponential action smoothing alpha (default: 0.50)")
     parser.add_argument("--obs_noise_scale", type=float, default=1.0, help="Observation noise scale factor")
     parser.add_argument("--render", action="store_true", help="Launch interactive 3D MuJoCo window to see robot manipulating objects in real-time")
     parser.add_argument("--show_actions", action="store_true", help="Print numerical action vectors during rollouts")

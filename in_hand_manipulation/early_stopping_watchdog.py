@@ -208,6 +208,19 @@ def main():
                             })
 
                     if eval_history:
+                        # Find the true all-time peak across entire history
+                        peak_idx = -1
+                        for idx, entry in enumerate(eval_history):
+                            if entry["composite_score"] > peak_score:
+                                peak_score = entry["composite_score"]
+                                peak_iter = entry["iteration"]
+                                peak_metrics = entry.copy()
+                                peak_idx = idx
+
+                        c1 = os.path.join(watch_dir, f"ppo_checkpoint_iter_{peak_iter}.pth")
+                        c2 = os.path.join(watch_dir, "ppo_eval_best_actor.pth")
+                        peak_ckpt = c1 if os.path.exists(c1) else c2
+
                         latest = eval_history[-1]
                         cur_iter = latest["iteration"]
                         cur_score = latest["composite_score"]
@@ -215,22 +228,10 @@ def main():
                         # Check if a new milestone has arrived
                         if cur_iter != last_processed_iter:
                             last_processed_iter = cur_iter
+                            consecutive_drops = (len(eval_history) - 1) - peak_idx
+                            drop_from_peak = peak_score - cur_score
 
-                            # Update all-time peak
-                            if cur_score > peak_score:
-                                peak_score = cur_score
-                                peak_iter = cur_iter
-                                peak_metrics = latest.copy()
-                                # Checkpoint file candidates
-                                c1 = os.path.join(watch_dir, f"ppo_checkpoint_iter_{peak_iter}.pth")
-                                c2 = os.path.join(watch_dir, "ppo_eval_best_actor.pth")
-                                peak_ckpt = c1 if os.path.exists(c1) else c2
-                                consecutive_drops = 0
-                                print(f"[Watchdog Peak @ Iter {cur_iter:05d}] New Peak Benchmark Score: {peak_score:.4f} (Succ: {latest['success_rate']*100:.1f}%, Clos: {latest['closure_rate']*100:.1f}%)", flush=True)
-                            else:
-                                consecutive_drops += 1
-                                drop_from_peak = peak_score - cur_score
-                                print(f"[Watchdog Track @ Iter {cur_iter:05d}] Score: {cur_score:.4f} (-{drop_from_peak:.4f} below peak {peak_score:.4f}) | Consecutive Drops: {consecutive_drops}/{args.patience}", flush=True)
+                            print(f"[Watchdog Track @ Iter {cur_iter:05d}] Current: {cur_score:.4f} | Peak: {peak_score:.4f} (@ Iter {peak_iter:05d}) | Drop: -{drop_from_peak:.4f} | Milestones since peak: {consecutive_drops}/{args.patience}", flush=True)
 
                             # -------------------------------------------------------------
                             # DEGRADATION CRITERIA EVALUATION
@@ -241,12 +242,12 @@ def main():
                             # Condition 1: Severe drop from peak (> max_drop)
                             if (peak_score - cur_score) >= args.max_drop and peak_score > 0.65:
                                 triggered = True
-                                trigger_reason = f"Severe score drop (-{peak_score - cur_score:.4f} >= -{args.max_drop:.4f}) below all-time peak ({peak_score:.4f} at Iter {peak_iter})"
+                                trigger_reason = f"Severe score drop (-{drop_from_peak:.4f} >= -{args.max_drop:.4f}) below all-time peak ({peak_score:.4f} at Iter {peak_iter})"
 
                             # Condition 2: Consecutive declining milestones
-                            elif consecutive_drops >= args.patience and (peak_score - cur_score) >= 0.035:
+                            elif consecutive_drops >= args.patience and drop_from_peak >= 0.035:
                                 triggered = True
-                                trigger_reason = f"Persistent degradation across {consecutive_drops} consecutive milestones (-{peak_score - cur_score:.4f} below peak {peak_score:.4f} at Iter {peak_iter})"
+                                trigger_reason = f"Persistent degradation across {consecutive_drops} milestones since peak (-{drop_from_peak:.4f} below peak {peak_score:.4f} at Iter {peak_iter})"
 
                             if triggered:
                                 print(f"\n" + "!"*75)

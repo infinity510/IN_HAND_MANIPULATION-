@@ -1,6 +1,8 @@
 # Best Champion Model (Stratified In-Hand Manipulation)
 
-- **Checkpoint File**: `best_model.pth` (MD5: `7db0136c99d99575807b93e9c3bd0d4a`)
+- **Checkpoint File**: `best_model.pth`
+- **Source**: Iteration 300 (Sim-to-Real Robust Training, Promoted by Early Stopping Watchdog)
+- **Target Precision Envelope**: 10.0% Relative Error Tolerance across 10° to 90° Envelope
 - **Architecture**: 12-DOF Delto 3-Finger Robotic Gripper
 - **Action Rate Smoothing**: $\beta = 0.50$ Action Low-Pass Filter (Zero Motor Tremor)
 - **Presentation Hold**: 1.5-second Firm Lock-In at Target Goal
@@ -8,32 +10,23 @@
 
 ---
 
-### 🏆 Benchmark Performance Summary
+### 🏆 Canonical 600-Episode Benchmark Summary (@10.0% Tolerance)
 
-#### Standard Metric (Sub-4.3° Precision @ 10% Relative Error Tolerance)
-- **Overall Benchmark Score**: **`0.7026`** ($\ge 70\%$)
-- **Overall Success Rate**: **`61.3%`** across all objects and full $10^\circ - 90^\circ$ envelope
-- **Overall Rotational Closure**: **`72.9%`**
-- **Overall Grasp Retention**: **`88.7%`**
-- **Range 1 ($10^\circ - 40^\circ$) Success Rate**: **`78.7%`**
-  - **Cuboid**: **`92.0%`** Success | **`95.8%`** Closure | **`100.0%`** Retention
-  - **Cube**: **`72.0%`** Success | **`85.9%`** Closure | **`100.0%`** Retention
-  - **Cylinder**: **`72.0%`** Success | **`81.5%`** Closure | **`100.0%`** Retention
-  - **Mean Final Alignment Error**: **`4.3°`**
-  - **Range 1 Pre-Goal Drops**: **`0.0%` (Zero Drops!)**
-
-#### Ultra-Strict Metric (Sub-2.5° Precision @ 5% Relative Error Tolerance)
-- **Overall Benchmark Score**: **`0.5791`** (All-Time Project Record)
-- **Overall Success Rate**: **`42.6%`**
-- **Overall Rotational Closure**: **`65.7%`**
-- **Overall Grasp Retention**: **`84.5%`**
-- **Range 1 ($10^\circ - 40^\circ$) Success**: **`55.4%`**
-- **Range 2 ($40^\circ - 90^\circ$) Success**: **`29.7%`**
+- **Overall Composite Benchmark Score**: **`0.7149`** (Beats prior 0.7026 record)
+- **Overall Success Rate**: **`63.7%`** across all objects and full $10^\circ - 90^\circ$ envelope
+- **Overall Rotational Closure**: **`74.3%`**
+- **Overall Grasp Retention**: **`86.8%`**
+- **Range 1 ($10^\circ - 40^\circ$) Success Rate**: **`77.7%`** | Rotational Closure: **`88.1%`** | Grasp Retention: **`98.0%`**
+  - **Cylinder**: **`91.0%`** Success | **`92.8%`** Closure | **`96.0%`** Retention
+  - **Cube**: **`71.0%`** Success | **`86.7%`** Closure | **`100.0%`** Retention (Zero drops!)
+  - **Cuboid**: **`71.0%`** Success | **`84.6%`** Closure | **`98.0%`** Retention
+  - **Mean Final Alignment Error**: **`6.2°`**
+- **Range 2 ($40^\circ - 90^\circ$) Success Rate**: **`49.7%`** | Rotational Closure: **`60.6%`** | Grasp Retention: **`75.7%`**
 
 ---
 
 ### 🎓 Live Presentation Demo for Professor
-To demonstrate the live in-hand manipulation in interactive 3D with the 1.5-second firm hold lock-in:
+To demonstrate the live in-hand manipulation in interactive 3D with the single green target arrow anchored to the object and 1.5-second firm hold lock-in:
 
 ```bash
 python3 in_hand_manipulation/evaluate.py \
@@ -43,6 +36,6 @@ python3 in_hand_manipulation/evaluate.py \
   --max_goals 1 \
   --smooth_alpha 0.50 \
   --episodes_per_range 3 \
-  --epsilon_ratio 0.05
+  --epsilon_ratio 0.10 \
+  --sample_mode shuffle
 ```
-

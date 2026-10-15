@@ -17,7 +17,7 @@ Features:
   - --checkpoint <path> : Model checkpoint path to evaluate.
   - --render            : Launches interactive 3D MuJoCo passive viewer.
   - --episodes_per_range: Configurable episodes per range (default: 100).
-  - --num_workers       : Fast parallel evaluation when headless (default: 8).
+  - --num_workers       : Fast parallel evaluation when headless (default: 16).
   - Stratified metric reports for Range 1, Range 2, and Grand Composite.
 =============================================================================
 """
@@ -491,7 +491,7 @@ def run_parallel_evaluation(
     checkpoint_path: str,
     scene_xml_path: str,
     episodes_per_range: int = 100,
-    num_workers: int = 8,
+    num_workers: int = 16,
     epsilon_ratio: float = 0.10,
 ):
     """High-speed headless multi-worker evaluation across both angle ranges."""
@@ -680,8 +680,8 @@ def main():
     parser.add_argument(
         "--num_workers",
         type=int,
-        default=8,
-        help="Number of CPU worker processes in parallel mode (default: 8)",
+        default=16,
+        help="Number of CPU worker processes in parallel mode (default: 16)",
     )
     parser.add_argument(
         "--epsilon_ratio",

@@ -383,17 +383,17 @@ class DeltoInHandManipulationEnv:
         # 1. Reset Gripper Joints
         self.reset_gripper_pose()
         
-        # 2. Select Active Object (Adaptive Hard-Negative Sampling: struggling objects receive up to 55%)
+        # 2. Select Active Object (Balanced Adaptive Sampling: struggling objects receive ~40% focus)
         if object_id is None:
             fails = np.array([
                 1.0 - (self.object_performance[k][0] / max(1, self.object_performance[k][1]))
                 for k in [1, 2, 3]
             ], dtype=np.float32)
-            w = np.exp(0.8 * fails)
+            w = np.exp(0.4 * fails)
             p = w / w.sum()
-            # Adaptive hard-negative focus: struggling objects (Cylinder) receive up to 55% practice
-            # while mastered objects (Cuboid at ~80% succ) maintain skills at 15-20%
-            p = np.clip(p, 0.15, 0.55)
+            # Balanced focus: struggling objects receive up to ~40% practice while ensuring
+            # high-performing shapes provide >=60% clean success trajectories for stable policy gradients
+            p = np.clip(p, 0.25, 0.42)
             p = p / p.sum()
             self.active_object_id = int(np.random.choice([1, 2, 3], p=p))
         else:
@@ -704,7 +704,9 @@ class DeltoInHandManipulationEnv:
         zero_contact_pen = w.w7 if (n_c == 0) else 0.0
         # Survival reward scaled by rotational closure: prevents passive freezing in palm cradle
         base_alive = getattr(w, 'w_alive', 0.80)
-        alive_reward = 0.0 if is_dropped else float(base_alive * (0.25 + 0.75 * step_closure))
+        # Dynamic Motion-Gating: If stationary outside goal (rel_error > 0.15 and ||omega_obj|| < 0.03), cut alive reward to 0.0!
+        is_stalled = bool(obj_angvel_norm < 0.03 and rel_error > 0.15)
+        alive_reward = 0.0 if (is_dropped or is_stalled) else float(base_alive * (0.25 + 0.75 * step_closure))
         
         # Anti-plateau urgency pressure on incomplete rotation:
         # Prevents policy from idling at 40-80% closure to collect passive alive rewards.

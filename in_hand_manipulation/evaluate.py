@@ -30,6 +30,7 @@ import numpy as np
 import scipy.spatial.transform as transform
 import torch
 import multiprocessing as mp
+import mujoco
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -348,6 +349,9 @@ def run_rendered_evaluation(
                         if cur_torque > peak_torque:
                             peak_torque = cur_torque
 
+                        cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
+                        tol_deg = float(epsilon_ratio * init_angle_deg)
+
                         # Real-time visual orientation arrows:
                         # - GREEN (3 Orthogonal Coordinate Arrows): STRICTLY FIXED in space at fixed_target_base
                         # - BLUE (3 Orthogonal Coordinate Arrows): ATTACHED to moving object at moving_obj_base
@@ -394,8 +398,6 @@ def run_rendered_evaluation(
                                     _add_user_arrow(viewer.user_scn, moving_obj_base, tip_pos, rad_cur, rgba)
 
                             # Overlay real-time HUD telemetry on passive viewer
-                            cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
-                            tol_deg = float(epsilon_ratio * init_angle_deg)
                             viewer.set_texts([
                                 (
                                     mujoco.mjtFontScale.mjFONTSCALE_150,

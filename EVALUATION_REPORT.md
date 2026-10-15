@@ -1,7 +1,7 @@
 ======================================================================================
-IN-HAND MANIPULATION STRATIFIED BENCHMARK REPORT (@5.0% Error Tolerance)
+IN-HAND MANIPULATION STRATIFIED BENCHMARK REPORT (@10.0% Error Tolerance)
 Checkpoint: best_model/best_model.pth
-Total Episodes Evaluated: 900
+Total Episodes Evaluated: 600
 ======================================================================================
 
 ######################################################################################
@@ -9,40 +9,40 @@ SECTION 1: RANGE 1 (10.0° to 40.0° Small-to-Medium Rotations)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 150      |   24.7%  |   38.9%  |   68.7%  |   31.3%  |   47.3%  |  64.4°     | 319.7
-Cube         | 150      |   58.0%  |   81.5%  |   96.7%  |    3.3%  |   19.3%  |  25.5°     | 352.0
-Cuboid       | 150      |   79.3%  |   94.4%  |  100.0%  |    0.0%  |   20.0%  |  24.0°     | 347.6
+Cylinder     | 100      |   51.0%  |   59.5%  |   80.0%  |   20.0%  |   44.0%  |  58.3°     | 311.4
+Cube         | 100      |   86.0%  |   93.4%  |   98.0%  |    2.0%  |   19.0%  |  27.2°     | 308.2
+Cuboid       | 100      |   97.0%  |   97.8%  |   99.0%  |    1.0%  |   24.0%  |  27.5°     | 266.5
 ---------------------------------------------------------------------------------------------------------
-RANGE 1 TOTAL | 450      |   54.0%  |   71.6%  |   88.4%  |   11.6%  |   28.9%  |  38.0°     | 339.7
-  --> Range 1 Effective Manipulation Index (EMI): 0.6332 | Benchmark Score: 0.6617
+RANGE 1 TOTAL | 300      |   78.0%  |   83.6%  |   92.3%  |    7.7%  |   29.0%  |  37.6°     | 295.4
+  --> Range 1 Effective Manipulation Index (EMI): 0.7715 | Benchmark Score: 0.8253
 
 ######################################################################################
 SECTION 2: RANGE 2 (40.0° to 90.0° Large-Angle In-Hand Gaiting)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 150      |    2.7%  |    7.0%  |   20.0%  |   80.0%  |   82.7%  | 104.8°     | 339.7
-Cube         | 150      |   26.7%  |   43.2%  |   70.7%  |   29.3%  |   40.0%  |  55.2°     | 505.0
-Cuboid       | 150      |   36.0%  |   49.9%  |   61.3%  |   38.7%  |   54.7%  |  56.0°     | 416.2
+Cylinder     | 100      |   11.0%  |   14.0%  |   20.0%  |   80.0%  |   89.0%  | 107.4°     | 309.3
+Cube         | 100      |   37.0%  |   48.5%  |   78.0%  |   22.0%  |   37.0%  |  55.7°     | 478.3
+Cuboid       | 100      |   53.0%  |   63.7%  |   74.0%  |   26.0%  |   48.0%  |  52.2°     | 391.4
 ---------------------------------------------------------------------------------------------------------
-RANGE 2 TOTAL | 450      |   21.8%  |   33.3%  |   50.7%  |   49.3%  |   59.1%  |  72.0°     | 420.3
-  --> Range 2 Effective Manipulation Index (EMI): 0.1689 | Benchmark Score: 0.3102
+RANGE 2 TOTAL | 300      |   33.7%  |   42.1%  |   57.3%  |   42.7%  |   58.0%  |  71.8°     | 393.0
+  --> Range 2 Effective Manipulation Index (EMI): 0.2412 | Benchmark Score: 0.4092
 
 ======================================================================================
 SECTION 3: GRAND COMPOSITE VERIFICATION SUMMARY (FULL 10° TO 90° ENVELOPE)
 ======================================================================================
 Evaluation Metric                   | Range 1 (10°-40°)    | Range 2 (40°-90°)    | Grand Total    
 ------------------------------------------------------------------------------------------------
-Total Evaluated Episodes            | 450                  | 450                  | 900            
-Success Rate (@10% Error)           | 54.0               % | 21.8               % | 37.9          %
-Mean Rotational Closure             | 71.6               % | 33.3               % | 52.5          %
-Pre-Goal Retention Rate             | 88.4               % | 50.7               % | 69.6          %
-Pre-Goal Drop Rate                  | 11.6               % | 49.3               % | 30.4          %
-Raw Drop Rate (All Steps)           | 28.9               % | 59.1               % | 44.0          %
-Mean Final Geodesic Error           | 38.0               ° | 72.0               ° | 55.0          °
-Mean Steps per Episode              | 339.7                | 420.3                | 380.0          
-Peak Hardware Torque                | 5.43             N·m | 6.01             N·m | 6.01        N·m
-Effective Manipulation Index (EMI)  | 0.6332               | 0.1689               | 0.3649         
-Composite Benchmark Score           | 0.6617               | 0.3102               | 0.4859         
+Total Evaluated Episodes            | 300                  | 300                  | 600            
+Success Rate (@10% Error)           | 78.0               % | 33.7               % | 55.8          %
+Mean Rotational Closure             | 83.6               % | 42.1               % | 62.8          %
+Pre-Goal Retention Rate             | 92.3               % | 57.3               % | 74.8          %
+Pre-Goal Drop Rate                  | 7.7                % | 42.7               % | 25.2          %
+Raw Drop Rate (All Steps)           | 29.0               % | 58.0               % | 43.5          %
+Mean Final Geodesic Error           | 37.6               ° | 71.8               ° | 54.7          °
+Mean Steps per Episode              | 295.4                | 393.0                | 344.2          
+Peak Hardware Torque                | 5.69             N·m | 5.85             N·m | 5.85        N·m
+Effective Manipulation Index (EMI)  | 0.7715               | 0.2412               | 0.4701         
+Composite Benchmark Score           | 0.8253               | 0.4092               | 0.6173         
 ================================================================================================
 

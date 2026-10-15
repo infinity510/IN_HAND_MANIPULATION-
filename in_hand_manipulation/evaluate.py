@@ -91,7 +91,7 @@ def _worker_init(state_dict, obs_mean, obs_std, scene_xml_path, epsilon_ratio, s
 
 def _eval_single_task(task_args):
     """Worker task execution function for headless multiprocessing pool."""
-    global _w_actor, _w_env, _w_epsilon_ratio
+    global _w_actor, _w_env, _w_epsilon_ratio, _w_smooth_alpha
     seed, range_id, obj_id, min_rad, max_rad = task_args
     np.random.seed(seed)
 

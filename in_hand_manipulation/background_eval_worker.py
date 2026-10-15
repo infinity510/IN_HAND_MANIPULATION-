@@ -32,7 +32,6 @@ if SCRIPT_DIR not in sys.path:
 from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 # Global worker state for multi-process pool
-# Global worker state for multi-process pool
 _worker_actor = None
 _worker_env = None
 _worker_epsilon_ratio = 0.10

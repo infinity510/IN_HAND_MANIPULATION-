@@ -186,6 +186,47 @@ def _eval_single_task(task_args):
     }
 
 
+def _add_user_sphere(scn, pos, radius, rgba):
+    """Adds a decorative sphere to the MuJoCo viewer user scene."""
+    if scn.ngeom >= scn.maxgeom:
+        return
+    g = scn.geoms[scn.ngeom]
+    mujoco.mjv_initGeom(
+        g,
+        type=mujoco.mjtGeom.mjGEOM_SPHERE,
+        size=np.array([radius, radius, radius], dtype=np.float64),
+        pos=np.asarray(pos, dtype=np.float64),
+        mat=np.eye(3).flatten().astype(np.float64),
+        rgba=np.array(rgba, dtype=np.float32),
+    )
+    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+    scn.ngeom += 1
+
+
+def _add_user_arrow(scn, p1, p2, radius, rgba):
+    """Adds a decorative connector arrow to the MuJoCo viewer user scene."""
+    if scn.ngeom >= scn.maxgeom:
+        return
+    g = scn.geoms[scn.ngeom]
+    mujoco.mjv_initGeom(
+        g,
+        type=mujoco.mjtGeom.mjGEOM_ARROW,
+        size=np.zeros(3, dtype=np.float64),
+        pos=np.zeros(3, dtype=np.float64),
+        mat=np.eye(3).flatten().astype(np.float64),
+        rgba=np.array(rgba, dtype=np.float32),
+    )
+    mujoco.mjv_connector(
+        g,
+        mujoco.mjtGeom.mjGEOM_ARROW,
+        radius,
+        np.asarray(p1, dtype=np.float64),
+        np.asarray(p2, dtype=np.float64),
+    )
+    g.category = mujoco.mjtCatBit.mjCAT_DECOR
+    scn.ngeom += 1
+
+
 def run_rendered_evaluation(
     checkpoint_path: str,
     scene_xml_path: str,
@@ -275,9 +316,14 @@ def run_rendered_evaluation(
                     env.set_epsilon_ratio(epsilon_ratio)
                     env.set_epsilon(epsilon_ratio * theta_rad)
 
-                    # Reference axis: strictly the direction of the top surface of the object facing up (+Z in body frame)
                     half_height = 0.045 if obj_id == 2 else 0.07
-                    top_axis = np.array([0.0, 0.0, 1.0])
+
+                    # Fixed Target Coordinate Frame Anchor:
+                    # Initialized once at episode start above the initial object grasp and remains strictly FIXED throughout the episode
+                    init_obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
+                    init_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
+                    init_rot = transform.Rotation.from_quat([init_q[1], init_q[2], init_q[3], init_q[0]])
+                    fixed_target_base = init_obj_pos + init_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
 
                     step = 0
                     terminated = False
@@ -303,84 +349,49 @@ def run_rendered_evaluation(
                             peak_torque = cur_torque
 
                         # Real-time visual orientation arrows:
-                        # Red Arrow: Object's current top surface normal facing up
-                        # Green Arrow: Desired target top surface normal
+                        # - GREEN (3 Orthogonal Coordinate Arrows): STRICTLY FIXED in space at fixed_target_base
+                        # - BLUE (3 Orthogonal Coordinate Arrows): ATTACHED to moving object at moving_obj_base
                         try:
                             obj_pos = env.data.qpos[obj_idx : obj_idx + 3].copy()
                             cur_q = env.data.qpos[obj_idx + 3 : obj_idx + 7]
                             cur_rot = transform.Rotation.from_quat([cur_q[1], cur_q[2], cur_q[3], cur_q[0]])
+                            moving_obj_base = obj_pos + cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
+
                             tgt_q = env.target_quat
                             tgt_rot = transform.Rotation.from_quat([tgt_q[1], tgt_q[2], tgt_q[3], tgt_q[0]])
 
-                            # Base point: anchored on the top face of the object (above black marker)
-                            # This ensures the arrows are prominently visible and never occluded inside the object body
-                            top_offset = cur_rot.apply(np.array([0.0, 0.0, half_height + 0.005]))
-                            base_point = obj_pos + top_offset
-
-                            # Strictly pointing along the direction of the top surface facing up:
-                            cur_dir = cur_rot.apply(top_axis)
-                            tgt_dir = tgt_rot.apply(top_axis)
-
-                            arrow_len = 0.16
-                            arrow_rad = 0.010
-                            p2_cur = base_point + arrow_len * cur_dir
-                            p2_tgt = base_point + arrow_len * tgt_dir
+                            # Sleek, reduced arrow widths and lengths
+                            rad_tgt = 0.0030  # Sleek radius for fixed target axes (diameter 6mm)
+                            rad_cur = 0.0025  # Sleek radius for moving object axes (diameter 5mm)
+                            len_tgt = 0.12    # Target axes slightly longer so they remain visible when aligned
+                            len_cur = 0.10    # Object body axes
 
                             with viewer.lock():
                                 viewer.user_scn.ngeom = 0
 
-                                # 1. Yellow anchor hub sphere on top marker
-                                hub_geom = viewer.user_scn.geoms[viewer.user_scn.ngeom]
-                                mujoco.mjv_initGeom(
-                                    hub_geom,
-                                    type=mujoco.mjtGeom.mjGEOM_SPHERE,
-                                    size=np.array([0.009, 0.009, 0.009], dtype=np.float64),
-                                    pos=base_point.astype(np.float64),
-                                    mat=np.eye(3).flatten().astype(np.float64),
-                                    rgba=np.array([1.0, 0.85, 0.0, 1.0], dtype=np.float32),
-                                )
-                                hub_geom.category = mujoco.mjtCatBit.mjCAT_DECOR
-                                viewer.user_scn.ngeom += 1
+                                # 1. FIXED TARGET ORIENTATION AXIS (3 ARROWS IN GREEN)
+                                _add_user_sphere(viewer.user_scn, fixed_target_base, 0.0045, [0.15, 0.90, 0.20, 1.0])
+                                target_axes_spec = [
+                                    (np.array([1.0, 0.0, 0.0]), [0.35, 1.00, 0.35, 0.95]),  # Target X (Lime Green)
+                                    (np.array([0.0, 1.0, 0.0]), [0.15, 0.90, 0.20, 0.95]),  # Target Y (Emerald Green)
+                                    (np.array([0.0, 0.0, 1.0]), [0.00, 0.75, 0.10, 0.95]),  # Target Z (Forest Green)
+                                ]
+                                for axis_vec, rgba in target_axes_spec:
+                                    dir_vec = tgt_rot.apply(axis_vec)
+                                    tip_pos = fixed_target_base + len_tgt * dir_vec
+                                    _add_user_arrow(viewer.user_scn, fixed_target_base, tip_pos, rad_tgt, rgba)
 
-                                # 2. Red Arrow: Current Object Orientation
-                                g_cur = viewer.user_scn.geoms[viewer.user_scn.ngeom]
-                                mujoco.mjv_initGeom(
-                                    g_cur,
-                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
-                                    size=np.zeros(3, dtype=np.float64),
-                                    pos=np.zeros(3, dtype=np.float64),
-                                    mat=np.eye(3).flatten().astype(np.float64),
-                                    rgba=np.array([1.0, 0.05, 0.05, 1.0], dtype=np.float32),  # Bright RED
-                                )
-                                mujoco.mjv_connector(
-                                    g_cur,
-                                    mujoco.mjtGeom.mjGEOM_ARROW,
-                                    arrow_rad,
-                                    base_point,
-                                    p2_cur,
-                                )
-                                g_cur.category = mujoco.mjtCatBit.mjCAT_DECOR
-                                viewer.user_scn.ngeom += 1
-
-                                # 3. Green Arrow: Desired Target Orientation
-                                g_tgt = viewer.user_scn.geoms[viewer.user_scn.ngeom]
-                                mujoco.mjv_initGeom(
-                                    g_tgt,
-                                    type=mujoco.mjtGeom.mjGEOM_ARROW,
-                                    size=np.zeros(3, dtype=np.float64),
-                                    pos=np.zeros(3, dtype=np.float64),
-                                    mat=np.eye(3).flatten().astype(np.float64),
-                                    rgba=np.array([0.05, 1.0, 0.05, 1.0], dtype=np.float32),  # Bright GREEN
-                                )
-                                mujoco.mjv_connector(
-                                    g_tgt,
-                                    mujoco.mjtGeom.mjGEOM_ARROW,
-                                    arrow_rad,
-                                    base_point,
-                                    p2_tgt,
-                                )
-                                g_tgt.category = mujoco.mjtCatBit.mjCAT_DECOR
-                                viewer.user_scn.ngeom += 1
+                                # 2. MOVING OBJECT ORIENTATION (3 ARROWS IN BLUE ATTACHED TO OBJECT)
+                                _add_user_sphere(viewer.user_scn, moving_obj_base, 0.0038, [0.20, 0.60, 1.00, 1.0])
+                                object_axes_spec = [
+                                    (np.array([1.0, 0.0, 0.0]), [0.40, 0.75, 1.00, 0.95]),  # Object X (Sky Blue)
+                                    (np.array([0.0, 1.0, 0.0]), [0.15, 0.50, 0.95, 0.95]),  # Object Y (Royal Blue)
+                                    (np.array([0.0, 0.0, 1.0]), [0.00, 0.25, 0.85, 0.95]),  # Object Z (Navy Blue)
+                                ]
+                                for axis_vec, rgba in object_axes_spec:
+                                    dir_vec = cur_rot.apply(axis_vec)
+                                    tip_pos = moving_obj_base + len_cur * dir_vec
+                                    _add_user_arrow(viewer.user_scn, moving_obj_base, tip_pos, rad_cur, rgba)
 
                             # Overlay real-time HUD telemetry on passive viewer
                             cur_err_deg = float(np.degrees(step_info.get("d_theta", env.prev_d_theta)))
@@ -389,7 +400,7 @@ def run_rendered_evaluation(
                                 (
                                     mujoco.mjtFontScale.mjFONTSCALE_150,
                                     mujoco.mjtGridPos.mjGRID_TOPLEFT,
-                                    f"RED: Current | GREEN: Target | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
+                                    f"BLUE (3 Axes): Current Object | GREEN (3 Axes): Target (Fixed) | [{r_name}] {obj_name} Ep {ep}/{episodes_per_range}",
                                     f"Err: {cur_err_deg:.1f}° (Tol: {tol_deg:.1f}°) | Goals: {step_info.get('successes_in_episode', 0)} | Step: {step}",
                                 )
                             ])

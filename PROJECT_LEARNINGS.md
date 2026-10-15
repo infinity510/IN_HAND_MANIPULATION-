@@ -164,11 +164,12 @@ The robotics literature often evaluates orientation tasks using loose absolute e
   * The instant the object error falls below tolerance, the controller locks fingertip control torques (`env.data.ctrl[:] = last_ctrl`) and damps residual joint velocities (`qvel[:12] *= 0.85`).
   * The gripper holds the object rock-solid in the target orientation for $\ge 1.5$ continuous seconds while displaying a live HUD countdown before completing the episode.
 
-### 5.3 Interactive 3D Visual Feedback & HUD Telemetry
-* Integrated visual cues directly into MuJoCo's user decorative scene:
-  * **Yellow Anchor Hub**: Anchored at the top face of the object body.
-  * **Red Arrow**: Visualizes the current 3D surface normal vector of the object.
-  * **Green Arrow**: Visualizes the exact target 3D orientation vector.
+### 5.3 Interactive 3D Visual Feedback & Triad Coordinate Frames
+* Integrated sleek multi-axis visual cues directly into MuJoCo's user decorative scene (`user_scn`):
+  * **Sleek Arrow Dimensions**: Reduced width from bulky $10\text{ mm}$ to sleek $2.5\text{--}3.0\text{ mm}$ radius for crisp, non-obtrusive viewing.
+  * **Moving Object Orientation (3 Arrows in Blue)**: A 3-axis orthogonal coordinate triad (X: sky blue, Y: royal blue, Z: navy blue) attached to the top face of the moving object, rotating and translating with the object in real time.
+  * **Target Orientation Coordinate Axis (3 Arrows in Green)**: A 3-axis orthogonal coordinate triad (X: lime green, Y: emerald green, Z: forest green) anchored at the initial grasp top position, remaining **strictly fixed throughout the episode**.
+  * **Visual Alignment Convergence**: When the object reaches the target orientation in hand, the blue object triad directly coincides with the stationary green target triad.
   * **Real-time HUD**: Displays instantaneous error in degrees, target tolerance threshold, goal count, and hold countdown.
 
 ---

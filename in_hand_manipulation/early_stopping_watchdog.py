@@ -209,13 +209,11 @@ def main():
 
                     if eval_history:
                         # Find the true all-time peak across entire history
-                        peak_idx = -1
-                        for idx, entry in enumerate(eval_history):
-                            if entry["composite_score"] > peak_score:
-                                peak_score = entry["composite_score"]
-                                peak_iter = entry["iteration"]
-                                peak_metrics = entry.copy()
-                                peak_idx = idx
+                        best_entry = max(eval_history, key=lambda e: e["composite_score"])
+                        peak_score = best_entry["composite_score"]
+                        peak_iter = best_entry["iteration"]
+                        peak_metrics = best_entry.copy()
+                        peak_idx = eval_history.index(best_entry)
 
                         c1 = os.path.join(watch_dir, f"ppo_checkpoint_iter_{peak_iter}.pth")
                         c2 = os.path.join(watch_dir, "ppo_eval_best_actor.pth")

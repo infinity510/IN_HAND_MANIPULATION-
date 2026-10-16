@@ -438,9 +438,9 @@ class DeltoInHandManipulationEnv:
             ], dtype=np.float32)
             w = np.exp(0.4 * fails)
             p = w / w.sum()
-            # Balanced focus: struggling objects receive up to ~40% practice while ensuring
-            # high-performing shapes provide >=60% clean success trajectories for stable policy gradients
-            p = np.clip(p, 0.25, 0.42)
+            # Balanced focus: struggling objects receive up to ~50% practice while ensuring
+            # high-performing shapes provide >=50% clean success trajectories for stable policy gradients
+            p = np.clip(p, 0.20, 0.50)
             p = p / p.sum()
             self.active_object_id = int(np.random.choice([1, 2, 3], p=p))
         else:
@@ -722,7 +722,9 @@ class DeltoInHandManipulationEnv:
         tight_core = float(np.exp(-0.5 * ((rel_error / (w.epsilon_ratio + 1e-6)) ** 2)))
         
         # Continuous Approach Slope: Bridges the 20% -> 10% error gap to pull past the 12% stalling barrier
-        approach_slope = 5.0 * float(max(0.0, (2.0 * w.epsilon_ratio - rel_error) / (2.0 * w.epsilon_ratio)))
+        approach_slope = 8.0 * float(max(0.0, (2.0 * w.epsilon_ratio - rel_error) / (2.0 * w.epsilon_ratio)))
+        # Steep Final-Approach Funnel (15% -> 10% error ramp): pulls policies directly into tolerance
+        ramp_15_to_10 = 12.0 * float(max(0.0, (1.5 * w.epsilon_ratio - rel_error) / (0.5 * w.epsilon_ratio)))
         
         # Progressive Sub-Tolerance Super-Precision Reward:
         # When orientation error successfully drops below epsilon_ratio (e.g. 10%),
@@ -733,7 +735,7 @@ class DeltoInHandManipulationEnv:
         else:
             sub_tol_bonus = 0.0
 
-        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core + approach_slope + sub_tol_bonus
+        precision_bonus = 4.0 * wide_funnel + w.w_precision * tight_core + approach_slope + ramp_15_to_10 + sub_tol_bonus
         
         # (b) Control Penalty: ||a_t||^2
         control_norm_sq = float(np.sum(np.square(action)))

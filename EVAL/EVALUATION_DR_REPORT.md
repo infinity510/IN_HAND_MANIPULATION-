@@ -1,7 +1,7 @@
 ======================================================================================
 IN-HAND MANIPULATION SIM-TO-REAL DOMAIN RANDOMIZATION REPORT (@10.0% Tol)
-Checkpoint: best_model/best_model.pth
-Total Episodes Evaluated: 150
+Checkpoint: /mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/fine_tune_training/stage14_breakthrough_70plus/ppo_final_champion_actor.pth
+Total Episodes Evaluated: 600
 DR Conditions:
   • Actuation Delay: 0 to 1 steps (0 to 20 ms lag)
   • ArUco Vision Latency: 1 to 2 steps (20 to 40 ms camera+pose lag)
@@ -17,40 +17,40 @@ SECTION 1: RANGE 1 (10.0° to 40.0° Small-to-Medium Rotations under DR)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 25       |   88.0%  |   90.9%  |   96.0%  |    4.0%  |    4.0%  |   9.0°     | 107.0
-Cube         | 25       |   80.0%  |   88.3%  |   96.0%  |    4.0%  |    4.0%  |   8.7°     | 169.6
-Cuboid       | 25       |   88.0%  |   93.4%  |  100.0%  |    0.0%  |    0.0%  |   3.3°     | 178.2
+Cylinder     | 100      |   69.0%  |   75.4%  |   87.0%  |   13.0%  |   13.0%  |  18.8°     | 150.0
+Cube         | 100      |   66.0%  |   76.0%  |   92.0%  |    8.0%  |    8.0%  |  15.5°     | 189.8
+Cuboid       | 100      |   83.0%  |   89.5%  |   96.0%  |    4.0%  |    4.0%  |   9.1°     | 179.1
 ---------------------------------------------------------------------------------------------------------
-RANGE 1 TOTAL | 75       |   85.3%  |   90.8%  |   97.3%  |    2.7%  |    2.7%  |   7.0°     | 151.6
-  --> Range 1 Effective Manipulation Index (EMI): 0.8842 | Benchmark Score: 0.8939
+RANGE 1 TOTAL | 300      |   72.7%  |   80.3%  |   91.7%  |    8.3%  |    8.3%  |  14.4°     | 173.0
+  --> Range 1 Effective Manipulation Index (EMI): 0.7360 | Benchmark Score: 0.7875
 
 ######################################################################################
 SECTION 2: RANGE 2 (40.0° to 90.0° Large-Angle In-Hand Gaiting under DR)
 ######################################################################################
 Object       | Episodes | Success   | Closure   | Pre-Ret   | Pre-Drop  | Raw-Drop  | Final Err  | Steps 
 ---------------------------------------------------------------------------------------------------------
-Cylinder     | 25       |   60.0%  |   62.8%  |   68.0%  |   32.0%  |   32.0%  |  48.9°     | 246.4
-Cube         | 25       |   28.0%  |   53.7%  |   88.0%  |   12.0%  |   12.0%  |  40.5°     | 480.0
-Cuboid       | 25       |   36.0%  |   56.3%  |   72.0%  |   28.0%  |   28.0%  |  34.3°     | 429.6
+Cylinder     | 100      |   54.0%  |   60.7%  |   73.0%  |   27.0%  |   27.0%  |  47.8°     | 299.8
+Cube         | 100      |   28.0%  |   45.4%  |   78.0%  |   22.0%  |   22.0%  |  49.4°     | 456.2
+Cuboid       | 100      |   52.0%  |   65.8%  |   76.0%  |   24.0%  |   24.0%  |  32.5°     | 317.0
 ---------------------------------------------------------------------------------------------------------
-RANGE 2 TOTAL | 75       |   41.3%  |   57.6%  |   76.0%  |   24.0%  |   24.0%  |  41.2°     | 385.4
-  --> Range 2 Effective Manipulation Index (EMI): 0.4378 | Benchmark Score: 0.5315
+RANGE 2 TOTAL | 300      |   44.7%  |   57.3%  |   75.7%  |   24.3%  |   24.3%  |  43.2°     | 357.7
+  --> Range 2 Effective Manipulation Index (EMI): 0.4334 | Benchmark Score: 0.5465
 
 ======================================================================================
 SECTION 3: GRAND COMPOSITE SIM-TO-REAL DR SUMMARY (FULL 10° TO 90° ENVELOPE)
 ======================================================================================
 Evaluation Metric                   | Range 1 (10°-40°)    | Range 2 (40°-90°)    | Grand Total    
 ------------------------------------------------------------------------------------------------
-Total Evaluated Episodes            | 75                   | 75                   | 150            
-Success Rate (@10.0% Error)         | 85.3               % | 41.3               % | 63.3          %
-Mean Rotational Closure             | 90.8               % | 57.6               % | 74.2          %
-Pre-Goal Retention Rate             | 97.3               % | 76.0               % | 86.7          %
-Pre-Goal Drop Rate                  | 2.7                % | 24.0               % | 13.3          %
-Raw Drop Rate (All Steps)           | 2.7                % | 24.0               % | 13.3          %
-Mean Final Geodesic Error           | 7.0                ° | 41.2               ° | 24.1          °
-Mean Steps per Episode              | 151.6                | 385.4                | 268.5          
-Peak Hardware Torque                | 5.26             N·m | 4.79             N·m | 5.26        N·m
-Effective Manipulation Index (EMI)  | 0.8842               | 0.4378               | 0.6432         
-Composite Benchmark Score           | 0.8939               | 0.5315               | 0.7127         
+Total Evaluated Episodes            | 300                  | 300                  | 600            
+Success Rate (@10.0% Error)         | 72.7               % | 44.7               % | 58.7          %
+Mean Rotational Closure             | 80.3               % | 57.3               % | 68.8          %
+Pre-Goal Retention Rate             | 91.7               % | 75.7               % | 83.7          %
+Pre-Goal Drop Rate                  | 8.3                % | 24.3               % | 16.3          %
+Raw Drop Rate (All Steps)           | 8.3                % | 24.3               % | 16.3          %
+Mean Final Geodesic Error           | 14.4               ° | 43.2               ° | 28.8          °
+Mean Steps per Episode              | 173.0                | 357.7                | 265.3          
+Peak Hardware Torque                | 6.13             N·m | 5.68             N·m | 6.13        N·m
+Effective Manipulation Index (EMI)  | 0.7360               | 0.4334               | 0.5755         
+Composite Benchmark Score           | 0.7875               | 0.5465               | 0.6670         
 ================================================================================================
 

@@ -881,7 +881,7 @@ When saving and resuming checkpoints (`ppo_best_actor.pth`, `ppo_latest_actor.pt
 
 To benchmark policies under standardized, stage-specific physical constraints, three dedicated evaluation scripts were created:
 
-```
+```text
 in_hand_manipulation/
 ├── evaluate_stage1.py    # Stage 1: Tripod Precision Envelope (theta <= 45.8 deg)
 ├── evaluate_stage2.py    # Stage 2: Large-Angle Gaiting Envelope (34.4 deg <= theta <= 80.2 deg)
@@ -1672,8 +1672,10 @@ Running exhaustive multi-object, multi-range benchmarks (e.g., 60-100 episodes p
 ### 1. The Sequential Evaluation Trap
 Historically, evaluation scripts iterated deterministically over objects:
 ```python
+# Sequential evaluation across objects (prior rigid implementation)
 for obj_id in [1, 2, 3]:
     for ep in range(episodes_per_range):
+        run_episode(obj_id, ep)
 ```
 This resulted in running all Cylinder episodes sequentially, then all Cube episodes, then all Cuboid episodes. In visual demonstrations, this appeared rigid, predictable, and artificial.
 
@@ -1864,10 +1866,16 @@ where:
 - $\alpha = 0.50$: Smoothing coefficient, providing optimal damping of high-frequency components while preserving agile reorientation capability.
 - $a_t$: Executed target command sent to the joint PD position actuators ($K_p = 50.0, K_d = 2.0$).
 
-### 3. Synergistic Action Rate Regularization
-The EMA filter is complemented by a quadratic action rate penalty in the reward function:
-$$r_{\text{action\_rate}} = - w_{\text{action\_rate}} \cdot \|a_t - a_{t-1}\|_2^2$$
-with $w_{\text{action\_rate}} = 0.05$.
+```python
+# First-order Exponential Moving Average (EMA) action filter (50 Hz)
+smooth_action = (self.smooth_alpha * self.prev_action) + ((1.0 - self.smooth_alpha) * action)
+self.prev_action = smooth_action.copy()
+
+# Action rate difference penalty
+action_diff_sq = float(np.sum(np.square(action - self.prev_action)))
+action_rate_penalty = w.w_action_rate * action_diff_sq
+```
+
 - **Result**: Completely eliminated motor jitter, reduced peak joint jerk by $>65\%$, and created smooth, compliant, biological-like finger articulation during complex reorientation maneuvers.
 
 ---
@@ -1890,11 +1898,25 @@ $$\Delta_{\text{hyperflex}, i} = \max(0, f_{\text{distal}, i} - 2.85)$$
 $$r_{\text{flat\_shelf}} = - 2.0 \cdot \sum_{i=1}^3 \Delta_{\text{hyperflex}, i}^2$$
 This permits firm grasping of thin objects while strictly forbidding clenched-fist palm tucks.
 
-#### B. Fingertip Palm Clearance Safety Floor
-A physical vertical clearance floor of $+12\text{ mm}$ ($z = 0.012\text{ m}$) above the palm hearth is strictly enforced:
-$$z_{\text{tip\_min}} = \min_{i \in \{1, 2, 3\}} z\left(\text{link}_{\text{tip}, i}\right)$$
-$$\Delta_{\text{palm\_intrusion}} = \max(0, 0.012 - z_{\text{tip\_min}})$$
-$$r_{\text{palm\_clearance}} = - 25.0 \cdot \Delta_{\text{palm\_intrusion}}^2$$
+```python
+# Distal knuckle anti-clenching regularization (threshold: 2.85 rad ~ 163 deg)
+distal_flexions = np.array([
+    post_qpos[2] + post_qpos[3],   # Finger 1 (m3 + m4)
+    post_qpos[6] + post_qpos[7],   # Finger 2 (m3 + m4)
+    post_qpos[10] + post_qpos[11]  # Finger 3 (m3 + m4)
+], dtype=np.float32)
+hyperflex_excess = np.maximum(0.0, distal_flexions - 2.85)
+flat_shelf_penalty = 2.0 * float(np.sum(np.square(hyperflex_excess)))
+
+# Fingertip palm clearance floor (+12 mm clearance above palm hearth)
+tip_z_min = min(
+    self.data.xpos[self.model.body("gripper_f1_04_link").id][2],
+    self.data.xpos[self.model.body("gripper_f2_04_link").id][2],
+    self.data.xpos[self.model.body("gripper_f3_04_link").id][2]
+)
+palm_intrusion_excess = max(0.0, 0.012 - tip_z_min)
+palm_clearance_penalty = 25.0 * (palm_intrusion_excess ** 2)
+```
 
 #### C. Empirical Verification
 - **Palm Intrusions**: Reduced to **$0.0\%$ across all 600 benchmark episodes**.
@@ -1919,10 +1941,18 @@ The 3D Palm Cradle Centering Stability Bonus is defined as:
 $$r_{\text{cradle}} = w_{\text{cradle}} \cdot \exp\left( - \left(\frac{d_{xy}}{0.04}\right)^2 - \left(\frac{|z_{\text{obj}} - z^*|}{0.03}\right)^2 \right)$$
 where $w_{\text{cradle}} = 0.55$ and $d_{xy} = \|p_{\text{obj}, xy}\|_2$.
 
-### 3. Active Off-Center Drift Penalty
-To prevent long cylindrical or rectangular objects from sliding laterally off the palm edges during dynamic gaiting:
-$$\Delta_{\text{drift}} = \max(0, d_{xy} - 0.045\text{ m})$$
-$$r_{\text{centering}} = - 2.5 \cdot \Delta_{\text{drift}}^2$$
+```python
+# Object-adaptive natural resting cradle height
+target_z = 0.065 if self.active_object_id == 2 else 0.095  # 2: Cube, 1/3: Cylinder/Cuboid
+z_dev = float(abs(obj_pos[2] - target_z))
+xy_dist = float(np.linalg.norm(obj_pos[:2]))
+cradle_bonus = w.w_cradle_bonus * float(np.exp(- ((xy_dist / 0.04) ** 2) - ((z_dev / 0.03) ** 2)))
+
+# Radial off-center drift penalty (> 45 mm radius from palm center)
+off_center_drift = float(max(0.0, xy_dist - 0.045))
+centering_penalty = 2.5 * (off_center_drift ** 2)
+```
+
 This effectively stabilizes the object within a $45\text{ mm}$ radial safety envelope centered over the palm.
 
 ---
@@ -1954,6 +1984,29 @@ flowchart LR
 4. **Target Tolerance Terminal Bonus**:
    A $+100.0$ terminal bonus is awarded upon crossing the threshold, triggering immediate goal resampling and step extension.
 
+```python
+# Continuous approach slope (20% -> 10% error)
+approach_slope = 8.0 * float(max(0.0, (2.0 * w.epsilon_ratio - rel_error) / (2.0 * w.epsilon_ratio)))
+
+# Steep final-approach funnel ramp (15% -> 10% error)
+ramp_15_to_10 = 12.0 * float(max(0.0, (1.5 * w.epsilon_ratio - rel_error) / (0.5 * w.epsilon_ratio)))
+
+# Progressive sub-tolerance super-precision bonus
+if rel_error < w.epsilon_ratio:
+    further_reduction = float((w.epsilon_ratio - rel_error) / (w.epsilon_ratio + 1e-6))
+    sub_tol_bonus = 10.0 * (further_reduction ** 1.5)
+else:
+    sub_tol_bonus = 0.0
+
+precision_bonus = (
+    4.0 * wide_funnel
+    + w.w_precision * tight_core
+    + approach_slope
+    + ramp_15_to_10
+    + sub_tol_bonus
+)
+```
+
 ---
 
 ## 56. Adaptive Practice Sampling (Struggling Object Focus) & Multi-Goal Chaining
@@ -1970,7 +2023,25 @@ An adaptive sampling mechanism was implemented in the environment rollouts:
 - Underperforming objects (the Cube) received up to $50\%$ of rollout episodes during fine-tuning stages, accelerating contact policy convergence.
 
 ### 3. Continuous Goal Resampling (OpenAI Dactyl Standard)
-Rather than terminating the episode when a goal is achieved, the environment immediately resamples a new random target quaternion $q_{\text{target}} \sim \text{SO}(3)$ and awards a step cap extension ($+100$ bonus steps). This encourages the policy to transition seamlessly between successive reorientation tasks without dropping the object or resetting to a rest state.
+Rather than terminating the episode when a goal is achieved, the environment immediately resamples a new random target quaternion $q_{\text{target}} \sim \text{SO}(3)$ and awards a step cap extension ($+100$ bonus steps). This encourages the policy to transition seamlessly between successive reorientation tasks without dropping the object or resetting to a rest state:
+
+```python
+# OpenAI Dactyl continuous goal resampling upon goal acquisition
+if is_success_this_step:
+    self.episode_successes += 1
+    term_success_bonus = w.w4  # +100.0 terminal bonus
+
+    self.target_quat = self._sample_target_quat()
+    self.prev_d_theta = self.compute_angular_distance(obj_quat, self.target_quat)
+    self.initial_d_theta = float(self.prev_d_theta)
+    self.current_epsilon = max(w.min_abs_epsilon, w.epsilon_ratio * self.initial_d_theta)
+
+    # Success time extension: chain consecutive goals
+    self.current_max_steps = min(
+        self.max_steps_cap,
+        self.current_max_steps + self.bonus_steps_per_success
+    )
+```
 
 ---
 

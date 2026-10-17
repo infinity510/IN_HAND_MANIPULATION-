@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 import markdown
+from pygments.formatters import HtmlFormatter
 
 def generate_pdf():
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -56,8 +57,18 @@ def generate_pdf():
     # Protect inline math ($...$) - negative lookbehind/lookahead for escaped dollar
     content = re.sub(r'(?<!\\)\$(.+?)(?<!\\)\$', save_inline_math, content)
 
-    # 2. Convert markdown to HTML
-    md = markdown.Markdown(extensions=['tables', 'fenced_code', 'toc'])
+    # 2. Convert markdown to HTML with Pygments code highlighting
+    md = markdown.Markdown(
+        extensions=['tables', 'fenced_code', 'codehilite', 'toc'],
+        extension_configs={
+            'codehilite': {
+                'css_class': 'highlight',
+                'guess_lang': False,
+                'pygments_style': 'one-dark',
+            }
+        }
+    )
+    pygments_css = HtmlFormatter(style='one-dark').get_style_defs('.highlight')
     body_html = md.convert(content)
 
     # 3. Restore Mermaid and LaTeX math
@@ -283,19 +294,39 @@ def generate_pdf():
         background-color: #f1f5f9;
     }
 
-    /* Code Blocks */
-    pre {
-        background-color: #0f172a;
-        color: #f8fafc;
-        padding: 10px 14px;
+    /* Code Blocks & Pygments Syntax Highlighting */
+    {pygments_css}
+
+    .highlight {
+        background-color: #0f172a !important;
+        border-radius: 6px;
+        margin: 10px 0 14px 0;
+        border: 1px solid #1e293b;
+        overflow-x: auto;
+        page-break-inside: avoid;
+    }
+
+    .highlight pre, pre {
+        background-color: #0f172a !important;
+        color: #abb2bf;
+        padding: 10px 14px !important;
         border-radius: 6px;
         font-family: "JetBrains Mono", Consolas, "Liberation Mono", Menlo, Courier, monospace;
         font-size: 8pt;
         line-height: 1.45;
         overflow-x: auto;
         page-break-inside: avoid;
-        border: 1px solid #1e293b;
-        margin: 10px 0 14px 0;
+        border: none !important;
+        margin: 0 !important;
+    }
+
+    .highlight code, pre code {
+        background-color: transparent !important;
+        color: inherit !important;
+        padding: 0 !important;
+        border: none !important;
+        font-family: inherit;
+        font-size: inherit;
     }
 
     code {
@@ -306,13 +337,6 @@ def generate_pdf():
         padding: 1px 4px;
         border-radius: 3px;
         border: 1px solid #e2e8f0;
-    }
-
-    pre code {
-        background-color: transparent;
-        color: inherit;
-        padding: 0;
-        border: none;
     }
 
     /* Blockquotes / Callouts */
@@ -429,7 +453,7 @@ def generate_pdf():
 </body>
 </html>
 """
-    html_document = html_template.replace('{body_html}', body_html)
+    html_document = html_template.replace('{body_html}', body_html).replace('{pygments_css}', pygments_css)
 
     print(f"[PDF Generator] Writing intermediate HTML to: {temp_html}")
     with open(temp_html, "w", encoding="utf-8") as f:

@@ -443,6 +443,9 @@ stage2*/
 fine_tune_training/
 metrics.jsonl
 *.jsonl
-progress.csv
 !in_hand_manipulation/bc_actor_checkpoint.pth
 !best_model/best_model.pth
+!best_model/best_model_with_dr.pth
+!best_model/best_model_clean.pth
+
+

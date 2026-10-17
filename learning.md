@@ -2069,7 +2069,7 @@ Verified on `best_model/best_model.pth` across 600 full domain randomization epi
   - **Cube**: **`72.0%` Success**, **`80.7%` Closure**, **`91.0%` Retention**!
 - **Grand Sim-to-Real Success Rate**: **`62.5%`** across all ranges and all shapes under full hardware delay ($0\text{--}20\text{ ms}$), vision latency ($20\text{--}40\text{ ms}$), sensor jitter ($0.80$), and silicone friction variations ($\mu \in [2.1, 3.9]$).
 - **Zero Hardware Intrusions**: $0.0\%$ palm collisions, peak joint torque $\le 5.48\text{ N}\cdot\text{m}$.
-- **Production Status**: Promoted to global production champion at `best_model/best_mode_withDRl.pth` (with standardized hardlink aliases `best_model_withDR.pth` and `best_model.pth`).
+- **Production Status**: Promoted to global production champion at `best_model/best_model_with_dr.pth` (with standardized hardlink aliases `best_model.pth`, `best_model_withDR.pth`, and `best_mode_withDRl.pth`).
 - **Ideal Case Baseline**: Preserved at `best_model/best_model_clean.pth` (zero-noise, nominal physics baseline for presentation recordings).
 
 

@@ -190,15 +190,20 @@ Range 2 (40° - 90° Large Dynamic In-Hand Gaiting):
 
 ```
 .
-├── IN_HAND_MANIPULATION_DOCUMENTATION.pdf  # 54-page publication-grade PDF documentation
+├── IN_HAND_MANIPULATION_DOCUMENTATION.pdf  # 55-page publication-grade PDF documentation
 ├── README.md                               # Root repository documentation & guide
 ├── learning.md                             # Comprehensive technical notes (57 sections)
 ├── best_model/                             # Champion production policy checkpoints
-│   ├── best_mode_withDRl.pth               # Sim-to-Real DR Champion (Stage 15 Iter 500)
-│   ├── best_model_withDR.pth               # Hardlink alias for standardized tooling
-│   ├── best_model.pth                      # Compatible alias for default CLI scripts
+│   ├── best_model_with_dr.pth              # Sim-to-Real DR Champion (Stage 15 Iter 500)
 │   ├── best_model_clean.pth                # Nominal baseline presentation model
+│   ├── best_model.pth                      # Canonical pointer & backwards-compatible alias
 │   └── README.md                           # Exact checkpoint telemetry & verification logs
+├── media/                                  # Demonstration media & analytical figures
+│   ├── videos/                             # Video MP4 demonstrations
+│   │   ├── stage1_nominal_dexterity.mp4    # Stage 1 nominal reorientation video
+│   │   └── stage2_large_angle_gaiting.mp4  # Stage 2 large-angle in-hand gaiting video
+│   └── plots/                              # Telemetry & convergence plots
+│       └── training_accuracy.png           # Accuracy progression plot
 ├── EVAL/                                   # Evaluation benchmark reports
 │   ├── EVALUATION_DR_REPORT.md             # 600-episode Sim-to-Real benchmark report
 │   ├── EVALUATION_REPORT.md                # 600-episode clean nominal benchmark report
@@ -213,8 +218,12 @@ Range 2 (40° - 90° Large Dynamic In-Hand Gaiting):
 │       ├── scene_cube.xml                  # Main MuJoCo simulation scene
 │       ├── gripper_only.xml                # Delto-3F kinematic definition
 │       └── meshes/                         # STL / OBJ geometric collision meshes
-└── scripts/
-    └── generate_documentation_pdf.py       # Chrome Headless KaTeX PDF generator script
+├── scripts/                                # Evaluation & documentation scripts
+│   ├── generate_documentation_pdf.py       # Chrome Headless KaTeX PDF generator script
+│   └── run_eval_demo.sh                    # Interactive CLI benchmark launcher
+└── docs/                                   # Supplementary guides & references
+    ├── teleop_pipeline_guide.md            # Teleoperation & collection reference
+    └── commands.txt                        # Command reference cheat-sheet
 ```
 
 ---
@@ -243,17 +252,23 @@ pip install torch torchvision numpy scipy mujoco matplotlib pyyaml markdown
 Run the interactive MuJoCo passive 3D viewer to watch the policy perform live in-hand manipulation:
 
 ```bash
-# Nominal Clean Presentation Model (Ideal kinematics for video demonstration)
+# Option A: Nominal Clean Presentation Model (Ideal kinematics for video demonstration)
 python in_hand_manipulation/evaluate.py \
     --checkpoint best_model/best_model_clean.pth \
     --render \
     --hold_time 1.5
 
-# Sim-to-Real Domain Randomization Champion (With live latency, sensor jitter, and EMA filtering)
+# Option B: Sim-to-Real Domain Randomization Champion (With live latency, sensor jitter, and EMA filtering)
 python in_hand_manipulation/evaluate_dr.py \
-    --checkpoint best_model/best_model.pth \
+    --checkpoint best_model/best_model_with_dr.pth \
     --render \
     --smooth_alpha 0.50
+```
+*(Note: `best_model/best_model.pth` is maintained as an active backward-compatible alias to `best_model_with_dr.pth`).*
+
+Alternatively, use the interactive one-click launcher:
+```bash
+bash scripts/run_eval_demo.sh
 ```
 
 ### 3. High-Throughput Parallel Sim-to-Real Benchmark
@@ -262,7 +277,7 @@ Execute the full 600-episode canonical benchmark across 16 parallel CPU workers:
 
 ```bash
 python in_hand_manipulation/evaluate_dr.py \
-    --checkpoint best_model/best_model.pth \
+    --checkpoint best_model/best_model_with_dr.pth \
     --episodes_per_range 100 \
     --num_workers 16 \
     --smooth_alpha 0.50 \
@@ -277,7 +292,7 @@ Launch distributed PPO fine-tuning with the early-stopping watchdog:
 
 ```bash
 python in_hand_manipulation/train_ppo.py \
-    --pretrained_actor best_model/best_model.pth \
+    --pretrained_actor best_model/best_model_with_dr.pth \
     --num_envs 16 \
     --smooth_alpha 0.50 \
     --sim2real_dr \
@@ -301,5 +316,6 @@ Before connecting to the physical Delto-3F gripper via USB/CAN bus, ensure the f
 
 ## 📜 Documentation & License
 
-- **Technical Report**: Complete 54-page PDF documentation is provided at [**`IN_HAND_MANIPULATION_DOCUMENTATION.pdf`**](IN_HAND_MANIPULATION_DOCUMENTATION.pdf).
+- **Technical Report**: Complete 55-page PDF documentation is provided at [**`IN_HAND_MANIPULATION_DOCUMENTATION.pdf`**](IN_HAND_MANIPULATION_DOCUMENTATION.pdf).
 - **License**: Released under the [MIT License](LICENSE).
+

@@ -38,7 +38,7 @@ IN_HAND_MANIPULATION-main/
 │   │   ├── test_rs.py                     # RealSense camera tester
 │   │   └── dex_retargeting_config.yml     # Inverse Kinematics retargeting params
 │
-└── agents.md                              # This documentation file
+└── teleop_pipeline_guide.md              # This documentation file
 ```
 
 ---

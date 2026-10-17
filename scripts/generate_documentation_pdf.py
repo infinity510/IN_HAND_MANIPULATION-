@@ -409,7 +409,7 @@ def generate_pdf():
                 <div class="specs-grid-item"><strong>Hardware Safety:</strong> Zero Palm Intrusions ($+12$ mm Floor), Anti-Clench ($163^\circ$)</div>
                 <div class="specs-grid-item"><strong>Sim-to-Real Latency:</strong> CAN Bus ($0\text{--}20$ ms) + ArUco Vision ($20\text{--}40$ ms)</div>
                 <div class="specs-grid-item"><strong>Silicone Contact Physics:</strong> Dynamic Sliding Friction $\mu \in [2.1, 3.9]$ ($\pm 30\%$)</div>
-                <div class="specs-grid-item"><strong>Champion Checkpoint:</strong> <code>best_mode_withDRl.pth</code> (alias: <code>best_model_withDR.pth</code>)</div>
+                <div class="specs-grid-item"><strong>Champion Checkpoint:</strong> <code>best_model_with_dr.pth</code> (alias: <code>best_model.pth</code>)</div>
                 <div class="specs-grid-item"><strong>Clean Baseline:</strong> <code>best_model_clean.pth</code> (Ideal kinematics)</div>
                 <div class="specs-grid-item"><strong>Champion Score:</strong> <code>0.7519</code> (Stage 15 Iteration 500 Peak)</div>
                 <div class="specs-grid-item"><strong>Sim-to-Real Success:</strong> <code>70.0%</code> Grand Success | <code>86.7%</code> Range 1 Success</div>

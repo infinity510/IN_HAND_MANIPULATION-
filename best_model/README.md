@@ -14,10 +14,10 @@ This directory contains the primary champion checkpoints for autonomous in-hand 
 
 ---
 
-## 2. Sim-to-Real Domain Randomization Champion: `best_mode_withDRl.pth`
+## 2. Sim-to-Real Domain Randomization Champion: `best_model_with_dr.pth`
 
-- **Primary Filename**: [`best_mode_withDRl.pth`](file:///mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/best_model/best_mode_withDRl.pth)
-- **Standardized Aliases (Hardlinked)**: `best_model_withDR.pth` | `best_model.pth`
+- **Primary Checkpoint**: [`best_model_with_dr.pth`](file:///mnt/Windows_SSD/Users/sheet/Desktop/AKSHAT/DC_PROJECT/best_model/best_model_with_dr.pth)
+- **Standardized Aliases (Hardlinked)**: `best_model.pth` | `best_model_withDR.pth` | `best_mode_withDRl.pth`
 - **Role**: Robust Sim-to-Real Domain Randomization Champion.
 - **Training Origin**: Stage 15 Precision Climax (`stage15_precision_climax_70plus`), **Iteration 500** (promoted by the Early-Stopping Watchdog).
 - **Action Rate Smoothing**: First-order exponential low-pass filter ($\alpha = 0.50$) on 50 Hz control loop ($20\text{ ms}$ control timesteps), eliminating motor jitter and reducing peak joint jerk by $>65\%$.

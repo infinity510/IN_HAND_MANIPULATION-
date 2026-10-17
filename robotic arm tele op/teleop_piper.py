@@ -30,8 +30,8 @@ def main():
     piper.GripperCtrl(0, 1000, 0x01, 0)
 
     print("Starting Webcam Tracker...")
-    # 5 markers tracked, edge length 0.08m (8cm)
-    tracker = WebcamArucoTracker(marker_length=0.08, alpha=0.65, camera_index=0)
+    # 5 markers tracked, edge length 0.06m (6cm)
+    tracker = WebcamArucoTracker(marker_length=0.06, alpha=0.65, camera_index=0)
     tracker.start()
     
     print("\n=== SYSTEM READY ===")

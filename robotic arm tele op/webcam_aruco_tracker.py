@@ -27,10 +27,10 @@ class WebcamArucoTracker:
         and re-orthonormalizes the rotation matrix via SVD.
       - Skips frames where the rotation matrix is invalid.
     """
-    def __init__(self, marker_length=0.08, alpha=0.65, max_lost_frames=5, camera_index=0, stl_path=None):
+    def __init__(self, marker_length=0.06, alpha=0.65, max_lost_frames=5, camera_index=0, stl_path=None):
         """
         Args:
-            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.08m = 80mm).
+            marker_length (float): Physical edge length of the ArUco marker in meters (default: 0.06m = 60mm).
             alpha (float): EMA filter coefficient. Higher = more responsive, Lower = more smoothed.
             max_lost_frames (int): Number of frames to predict with constant velocity before freezing.
             camera_index (int): USB camera index. Usually 0 for laptop webcam, 1 or 2 for external USB webcams.
@@ -481,7 +481,7 @@ class WebcamArucoTracker:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    tracker = WebcamArucoTracker(marker_length=0.08, camera_index=0)
+    tracker = WebcamArucoTracker(marker_length=0.06, camera_index=0)
     tracker.start()
     
     try:

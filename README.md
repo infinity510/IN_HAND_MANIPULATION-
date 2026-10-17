@@ -194,7 +194,9 @@ Range 2 (40° - 90° Large Dynamic In-Hand Gaiting):
 ├── README.md                               # Root repository documentation & guide
 ├── learning.md                             # Comprehensive technical notes (57 sections)
 ├── best_model/                             # Champion production policy checkpoints
-│   ├── best_model.pth                      # Sim-to-Real DR Champion (Stage 15 Iter 500)
+│   ├── best_mode_withDRl.pth               # Sim-to-Real DR Champion (Stage 15 Iter 500)
+│   ├── best_model_withDR.pth               # Hardlink alias for standardized tooling
+│   ├── best_model.pth                      # Compatible alias for default CLI scripts
 │   ├── best_model_clean.pth                # Nominal baseline presentation model
 │   └── README.md                           # Exact checkpoint telemetry & verification logs
 ├── EVAL/                                   # Evaluation benchmark reports

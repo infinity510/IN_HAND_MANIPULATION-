@@ -40,7 +40,7 @@ if SCRIPT_DIR not in sys.path:
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
+from in_hand_manipulation.train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 OBJECT_NAMES = {1: "Cylinder", 2: "Cube", 3: "Cuboid"}
 

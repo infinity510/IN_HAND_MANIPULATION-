@@ -29,7 +29,7 @@ PROJECT_ROOT = os.path.dirname(SCRIPT_DIR)
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
+from scripts.in_hand_manipulation.train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 # Global worker state for multi-process pool
 _worker_actor = None

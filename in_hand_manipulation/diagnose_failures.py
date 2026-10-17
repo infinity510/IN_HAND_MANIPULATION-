@@ -5,7 +5,7 @@ import torch
 from scipy.spatial import transform
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "in_hand_manipulation"))
-from train_ppo import DeltoInHandManipulationEnv, ActorNetwork
+from in_hand_manipulation.train_ppo import DeltoInHandManipulationEnv, ActorNetwork
 
 checkpoint_path = "best_model/best_model.pth"
 ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
